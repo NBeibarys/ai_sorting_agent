@@ -1,0 +1,32 @@
+# Local secrets and credentials.
+.env
+*.json
+!pyproject.json
+
+# Data files.
+*.xlsx
+*.xls
+*.csv
+checkpoint.json
+
+# Python-generated files.
+__pycache__/
+*.py[cod]
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+
+# Local agent and editor state.
+.agents/
+.claude/
+.superpowers/
+.gstack/
+
+# Operating-system and editor noise.
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

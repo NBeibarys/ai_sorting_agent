@@ -1,0 +1,13 @@
+[project]
+name = "ai-sorting-agent"
+version = "0.1.0"
+description = "Agentic system for sorting/processing Excel data using LLM agents"
+requires-python = ">=3.11"
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
