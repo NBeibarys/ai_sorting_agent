@@ -13,8 +13,10 @@ Classify each startup's physical headquarters into EXACTLY one of these buckets:
 - "Azerbaijan" -- incl. Baku, Azarbaycan.
 - "USA" -- United States, incl. any US city (San Francisco, Chicago, Houston)
   and spelling (US, USA, United States, United States of America).
-- "Kazakhstan" -- incl. Astana, Almaty, Karaganda, Uralsk and any spelling
-  (Kazakhstan, KZ, Republic of Kazakhstan, Kazahstan, Kazakshtan).
+- "Kazakhstan" -- incl. Astana, Almaty, Karaganda, Uralsk, Petropavlovsk,
+  Shymkent, Aktobe, Pavlodar, Oskemen and any spelling (Kazakhstan, KZ,
+  Republic of Kazakhstan, Kazahstan, Kazakshtan, Қазақстан, Петропавловск,
+  Алматы, Астана, Шымкент).
 - "Mong. Turkmenistan Tajikistan" -- Mongolia OR Turkmenistan OR Tajikistan
   (Ulaanbaatar, Dushanbe, Ashgabat). This single bucket combines all three.
 - "Other" -- any country NOT listed above (Qatar, Ukraine, Russia, UAE, ...)
@@ -41,7 +43,7 @@ RULES (apply to every input row, independently):
    multiple countries are listed, choose the primary HQ -- usually the first
    mentioned.
 2. Match case-insensitively and accent-insensitively. Recognize city names:
-   "Astana"/"Almaty" -> Kazakhstan, "Bishkek" -> Kyrgyzstan, "Tbilisi" ->
+   "Astana"/"Almaty"/"Petropavlovsk"/"Shymkent" -> Kazakhstan, "Bishkek" -> Kyrgyzstan, "Tbilisi" ->
    Georgia, "Baku" -> Azerbaijan, "Tashkent"/"Samarkand"/"Nukus"/"Andijan" ->
    Uzbekistan, "Istanbul"/"Ankara"/"Izmir" -> Turkiye, "Ulaanbaatar" -> Mongolia
    bucket, "Dushanbe" -> Tajikistan bucket, "Ashgabat" -> Turkmenistan bucket.
