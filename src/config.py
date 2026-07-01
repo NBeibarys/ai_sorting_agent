@@ -25,6 +25,10 @@ class Config:
     checkpoint_path: str
     country_column: str
     name_column: str
+    founder_name_column: str
+    email_column: str
+    telegram_column: str
+    pitch_deck_column: str
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -67,4 +71,14 @@ class Config:
                 "SORTER_COUNTRY_COLUMN", "physically headquartered"
             ),
             name_column=os.environ.get("SORTER_NAME_COLUMN", "name of your startup"),
+            founder_name_column=os.environ.get(
+                "SORTER_FOUNDER_NAME_COLUMN", "what is your name"
+            ),
+            email_column=os.environ.get("SORTER_EMAIL_COLUMN", "your email address"),
+            telegram_column=os.environ.get(
+                "SORTER_TELEGRAM_COLUMN", "your telegram handle"
+            ),
+            pitch_deck_column=os.environ.get(
+                "SORTER_PITCH_DECK_COLUMN", "pitch deck"
+            ),
         )

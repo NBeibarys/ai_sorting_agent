@@ -42,7 +42,9 @@ COL_NEEDLES = {
     "timestamp": ["timestamp"],
     "incorporated": ["incorporated"],
 }
-OPTIONAL_NEEDLES = {"incorporated"}
+# Display-only reference columns: a missing needle yields "" instead of
+# crashing the whole batch -- same tolerance `incorporated` already has.
+OPTIONAL_NEEDLES = {"incorporated", "founder", "email", "telegram", "pitch_deck"}
 
 
 def _norm(text: str) -> str:
@@ -59,6 +61,10 @@ def _find_columns(header: list, config: Config) -> dict:
         **COL_NEEDLES,
         "name": [config.name_column],
         "country": [config.country_column],
+        "founder": [config.founder_name_column],
+        "email": [config.email_column],
+        "telegram": [config.telegram_column],
+        "pitch_deck": [config.pitch_deck_column],
     }
     lowered = [(_norm(h), i) for i, h in enumerate(header)]
     found = {}
@@ -160,6 +166,13 @@ def _route_rows(row_meta, buckets, errored_indices, *, dry_run, header_row, name
     Other/excluded log. Returns (grouped, review_rows, other_log, green_coords,
     red_coords).
 
+    Each entry in `row_meta` is a 9-tuple:
+    (i, name, founder, email, telegram, pitch_deck, ts, incorporated_raw,
+    country_raw). Output rows (grouped, review, other_log) carry the same 8
+    display fields in output-column order:
+    (name, founder, email, telegram, pitch_deck, ts, incorporated_raw,
+    country_raw).
+
     Rows whose classifier flagged needs_review=True go to the Human Review list
     AND are marked RED in the source tab so an operator can spot rows awaiting
     sign-off. Every other row keeps the prior behavior: bucket rows and Other
@@ -171,21 +184,24 @@ def _route_rows(row_meta, buckets, errored_indices, *, dry_run, header_row, name
     other_log = []
     green_coords = []
     red_coords = []
-    for (i, name, ts, incorporated_raw, country_raw) in row_meta:
+    for (i, name, founder, email, telegram, pitch_deck,
+         ts, incorporated_raw, country_raw) in row_meta:
         entry = buckets[i]
         if entry is None:
             bucket, needs_review = "Other", False
         else:
             bucket, needs_review = entry
+        out_row = (name, founder, email, telegram, pitch_deck,
+                   ts, incorporated_raw, country_raw)
         if needs_review:
-            review_rows.append((name, ts, incorporated_raw, country_raw))
+            review_rows.append(out_row)
             if not dry_run and i not in errored_indices:
                 red_coords.append((header_row + i, name_col))
             continue
         if bucket in TARGET_TABS:
-            grouped[bucket].append((name, ts, incorporated_raw, country_raw))
+            grouped[bucket].append(out_row)
         else:
-            other_log.append((name, ts, incorporated_raw, country_raw, bucket))
+            other_log.append((*out_row, bucket))
         if not dry_run and i not in errored_indices:
             green_coords.append((header_row + i, name_col))
     return grouped, review_rows, other_log, green_coords, red_coords
@@ -239,7 +255,13 @@ def run_batch(config: Config, *, dry_run: bool = False, force: bool = False, lim
         rows = rows[:limit]
     cols = _find_columns(header, config)
     print(f"Read {len(rows)} data rows from {source}", flush=True)
-    print(f"Columns -> name: {cols['name']} | country: {cols['country']}", flush=True)
+    print(
+        "Columns -> "
+        f"name: {cols['name']} | country: {cols['country']} | "
+        f"founder: {cols.get('founder')} | email: {cols.get('email')} | "
+        f"telegram: {cols.get('telegram')} | pitch_deck: {cols.get('pitch_deck')}",
+        flush=True,
+    )
 
     header_row = 1
     form_responses_sheet_id = None
@@ -260,23 +282,34 @@ def run_batch(config: Config, *, dry_run: bool = False, force: bool = False, lim
 
     # Collect per-row fields up front so the whole batch can be classified in
     # a few LLM calls instead of one call per row.
-    row_meta = []  # (row_index, name, ts, incorporated_raw, country_raw)
+    # 9-tuple: (i, name, founder, email, telegram, pitch_deck, ts,
+    # incorporated_raw, country_raw). The 8 display fields after `i` are
+    # written verbatim into output tabs in this order.
+    def _opt(idx):
+        return _cell(row, idx) if idx is not None else ""
+
+    row_meta = []
     for i, row in enumerate(rows):
         name = _cell(row, cols["name"])
+        founder = _opt(cols.get("founder"))
+        email = _opt(cols.get("email"))
+        telegram = _opt(cols.get("telegram"))
+        pitch_deck = _opt(cols.get("pitch_deck"))
         ts = _cell(row, cols["timestamp"])
         country_raw = _cell(row, cols["country"])
-        incorporated_raw = (
-            _cell(row, cols["incorporated"])
-            if cols.get("incorporated") is not None else ""
+        incorporated_raw = _opt(cols.get("incorporated"))
+        row_meta.append(
+            (i, name, founder, email, telegram, pitch_deck,
+             ts, incorporated_raw, country_raw)
         )
-        row_meta.append((i, name, ts, incorporated_raw, country_raw))
 
     total = len(row_meta)
 
     # buckets[i] = (bucket, needs_review) for row index i (None until set).
     buckets = [None] * total
     to_classify = []  # list of (row_index, {"row_id": row_index, "country_raw": ...})
-    for (i, _name, _ts, _inc, country_raw) in row_meta:
+    for (i, _name, _founder, _email, _telegram, _pitch_deck,
+         _ts, _inc, country_raw) in row_meta:
         row_id = f"row_{i}"
         if not dry_run and checkpoint.get(row_id) and not force:
             buckets[i] = _checkpoint_entry(checkpoint[row_id])
@@ -287,7 +320,7 @@ def run_batch(config: Config, *, dry_run: bool = False, force: bool = False, lim
 
     if dry_run:
         for (i, _item) in to_classify:
-            country_raw = row_meta[i][4]
+            country_raw = row_meta[i][8]
             try:
                 buckets[i] = (deterministic_classify(country_raw), False)
             except Exception as exc:

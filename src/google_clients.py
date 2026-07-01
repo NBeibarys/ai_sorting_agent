@@ -89,26 +89,28 @@ def create_sheet_tab(sheets_service, sheet_id: str, title: str) -> None:
 
 
 def write_tab_data(sheets_service, sheet_id: str, title: str, rows, color: bool = True) -> None:
-    """Write [Startup Name, Timestamp, Incorporated, HQ Country] rows to a tab.
+    """Write 8-column rows to a tab.
 
-    Each row in `rows` is a 4-tuple (name, timestamp, incorporated_raw,
-    country_raw) copied verbatim from the source form responses -- these are
-    reference columns for display only and never feed the classifier. Clears
-    the tab first so a re-run with fewer matches in a bucket does not leave
-    the previous run's longer list visible below the new data. Always writes
-    a header row, even when `rows` is empty, so every tab has a consistent
-    shape.
+    Each row in `rows` is an 8-tuple in output column order:
+    (name, founder, email, telegram, pitch_deck, timestamp,
+    incorporated_raw, country_raw) -- copied verbatim from the source
+    form responses. These are reference columns for display only and never
+    feed the classifier. Clears the tab first so a re-run with fewer matches
+    in a bucket does not leave the previous run's longer list visible below
+    the new data. Always writes a header row, even when `rows` is empty, so
+    every tab has a consistent shape.
     """
     values = [[
         "Startup Name",
+        "Founder Name",
+        "Email",
+        "Telegram Handle",
+        "Pitch Deck",
         "Timestamp",
         "Where is your startup incorporated?",
         "In which country is your startup physically headquartered?",
     ]]
-    values.extend(
-        [name, timestamp, incorporated, country]
-        for name, timestamp, incorporated, country in rows
-    )
+    values.extend(list(row) for row in rows)
     # Clear any prior content across a generous range before writing.
     sheets_service.spreadsheets().values().clear(
         spreadsheetId=sheet_id,
