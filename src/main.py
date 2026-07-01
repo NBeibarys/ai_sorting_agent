@@ -22,6 +22,12 @@ def main():
         action="store_true",
         help="Re-classify every row, ignoring the checkpoint.",
     )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=0,
+        help="Only process first N rows (0 = all)",
+    )
     args = parser.parse_args()
 
     load_dotenv(override=False)
@@ -29,7 +35,7 @@ def main():
     print(f"Sheet:  {config.sheet_id} (tab {config.sheet_range!r})")
     print(f"Model:  {config.model}  (dry_run={args.dry_run}, vertex={config.use_vertex})")
 
-    result = run_batch(config, dry_run=args.dry_run, force=args.force)
+    result = run_batch(config, dry_run=args.dry_run, force=args.force, limit=args.limit)
     classified = result["classified"]
     errors = result["errors"]
     excluded = result["excluded"]

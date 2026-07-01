@@ -2,7 +2,7 @@
 Batch driver: reads application rows from a Google Sheet, classifies each
 startup's HQ country via the ADK agent (or a local heuristic in --dry-run),
 groups rows into country buckets, and writes one tab per target country back
-INTO THE SAME SHEET (columns: Startup Name, Timestamp).
+INTO THE SAME SHEET (columns: Startup Name, Timestamp, incorporated, HQ country).
 
 Rows are processed concurrently because they are fully independent — no shared
 state between applicants — so a ThreadPoolExecutor is sufficient; no need for
@@ -18,7 +18,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .config import Config
 from .google_clients import (
+    color_name_cell,
     create_sheet_tab,
+    get_sheet_id_by_title,
     get_sheets_service,
     read_sheet_rows,
     write_tab_data,
@@ -41,7 +43,12 @@ TARGET_TABS = OrderedDict([
 # sometimes carry trailing spaces or slight rewordings across cohorts).
 COL_NEEDLES = {
     "timestamp": ["timestamp"],
+    "incorporated": ["incorporated"],
 }
+
+# Needles that are nice-to-have but not required: a missing column here
+# resolves to index None instead of raising (the row loop emits "" for it).
+OPTIONAL_NEEDLES = {"incorporated"}
 
 
 def _norm(text: str) -> str:
@@ -71,16 +78,21 @@ def _find_columns(header: list, config: Config) -> dict:
     lowered = [(_norm(h), i) for i, h in enumerate(header)]
     found = {}
     for key, key_needles in needles.items():
+        # Normalize needles too (accent-fold + lowercase) so matching is
+        # truly case-insensitive, matching the docstring. Without this a
+        # mixed-case SORTER_*_COLUMN value never matches a lowercased
+        # header and every column lookup falsely fails.
+        norm_needles = [_norm(n) for n in key_needles]
         idx = next(
-            (i for low, i in lowered if any(n in low for n in key_needles)),
+            (i for low, i in lowered if any(n in low for n in norm_needles)),
             None,
         )
-        if idx is None:
+        if idx is None and key not in OPTIONAL_NEEDLES:
             raise RuntimeError(
                 f"Could not find the '{key}' column. Expected a header containing "
                 f"one of {key_needles}. Got headers: {header[:6]}..."
             )
-        found[key] = idx
+        found[key] = idx  # may be None for optional needles (e.g. incorporated)
     return found
 
 
@@ -164,7 +176,9 @@ def _print_summary(grouped: dict, other_log: list, total: int) -> None:
     if other_log:
         # Show where the excluded ones went, so misclassifications are visible.
         from collections import Counter
-        buckets = Counter(b for _, _, _, b in other_log)
+        # other_log rows are (name, ts, incorporated_raw, country_raw, bucket);
+        # the classified bucket is the last element.
+        buckets = Counter(t[-1] for t in other_log)
         print("\nExcluded breakdown (top):")
         for b, n in buckets.most_common(15):
             print(f"    {n:4d}  {b}")
@@ -193,7 +207,7 @@ def _read_csv_rows(path: str):
     return header, rows
 
 
-def run_batch(config: Config, *, dry_run: bool = False, force: bool = False):
+def run_batch(config: Config, *, dry_run: bool = False, force: bool = False, limit: int = 0):
     if dry_run:
         # Dry-run reads the local CSV copy only — never the production Sheet.
         header, rows = _read_csv_rows(_DRY_RUN_CSV)
@@ -205,12 +219,26 @@ def run_batch(config: Config, *, dry_run: bool = False, force: bool = False):
             sheets_service, config.sheet_id, config.sheet_range
         )
         source = f"sheet {config.sheet_id} (tab {config.sheet_range!r})"
+    if limit > 0:
+        rows = rows[:limit]
     cols = _find_columns(header, config)
     print(f"Read {len(rows)} data rows from {source}", flush=True)
     print(
         f"Columns -> name: {cols['name']} | country: {cols['country']}",
         flush=True,
     )
+
+    # Source-tab bookkeeping for per-row coloring. batchUpdate addresses tabs
+    # by integer sheetId (not title), so resolve the source tab's sheetId once
+    # here. header_row mirrors read_sheet_rows()'s default (1) -- data row i in
+    # `rows` lives at 0-indexed sheet row header_row + i. Skipped in dry-run:
+    # no sheets_service and no writes to the source tab.
+    header_row = 1
+    form_responses_sheet_id = None
+    if not dry_run:
+        form_responses_sheet_id = get_sheet_id_by_title(
+            sheets_service, config.sheet_id, config.sheet_range
+        )
 
     # Lazy import so --dry-run works without paying the ADK import cost and
     # so a missing/incompatible ADK install cannot break a heuristic run.
@@ -221,8 +249,8 @@ def run_batch(config: Config, *, dry_run: bool = False, force: bool = False):
 
     checkpoint = {} if dry_run else _load_checkpoint(config.checkpoint_path)
 
-    grouped = defaultdict(list)   # bucket -> [(name, timestamp)]
-    other_log = []                # [(row_id, name, ts, bucket)]
+    grouped = defaultdict(list)   # bucket -> [(name, ts, incorporated_raw, country_raw)]
+    other_log = []                # [(name, ts, incorporated_raw, country_raw, bucket)]
     errors = {}
 
     def _cell(row: list, idx: int) -> str:
@@ -233,8 +261,14 @@ def run_batch(config: Config, *, dry_run: bool = False, force: bool = False):
         name = _cell(row, cols["name"])
         ts = _cell(row, cols["timestamp"])
         country_raw = _cell(row, cols["country"])
+        # Optional column (may be absent in older sheets) -> emit "" then.
+        incorporated_raw = (
+            _cell(row, cols["incorporated"])
+            if cols.get("incorporated") is not None
+            else ""
+        )
         if not dry_run and checkpoint.get(row_id) and not force:
-            return row_id, checkpoint[row_id], name, ts, None
+            return row_id, checkpoint[row_id], name, ts, incorporated_raw, country_raw, None
         try:
             bucket = (
                 deterministic_classify(country_raw)
@@ -242,22 +276,40 @@ def run_batch(config: Config, *, dry_run: bool = False, force: bool = False):
                 else workflow.classify(country_raw)
             )
         except Exception as exc:  # noqa: BLE001 — isolate each row failure
-            return row_id, None, name, ts, f"{type(exc).__name__}: {exc}"
-        return row_id, bucket, name, ts, None
+            return row_id, None, name, ts, incorporated_raw, country_raw, f"{type(exc).__name__}: {exc}"
+        return row_id, bucket, name, ts, incorporated_raw, country_raw, None
 
     total = len(rows)
     with ThreadPoolExecutor(max_workers=config.max_concurrency) as pool:
         futures = {pool.submit(process, i, row): i for i, row in enumerate(rows)}
         done = 0
         for fut in as_completed(futures):
-            row_id, bucket, name, ts, err = fut.result()
+            row_id, bucket, name, ts, incorporated_raw, country_raw, err = fut.result()
             done += 1
             if err:
                 errors[row_id] = err
             elif bucket in TARGET_TABS:
-                grouped[bucket].append((name, ts))
+                grouped[bucket].append((name, ts, incorporated_raw, country_raw))
             else:
-                other_log.append((row_id, name, ts, bucket))
+                other_log.append((name, ts, incorporated_raw, country_raw, bucket))
+            # Mark each classified row by coloring its startup-name cell
+            # emerald green in the source "Form Responses 1" tab. Skipped in
+            # dry-run (no sheet writes) and for errored rows. Non-fatal: a
+            # coloring failure is logged but never aborts the batch.
+            if not dry_run and not err and bucket is not None:
+                try:
+                    color_name_cell(
+                        sheets_service,
+                        config.sheet_id,
+                        form_responses_sheet_id,
+                        header_row + futures[fut],
+                        cols["name"],
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    print(
+                        f"WARNING: could not color cell for {row_id}: {exc}",
+                        flush=True,
+                    )
             if not dry_run:
                 checkpoint[row_id] = bucket
             if done % 50 == 0 or done == total:
