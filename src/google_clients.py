@@ -88,29 +88,42 @@ def create_sheet_tab(sheets_service, sheet_id: str, title: str) -> None:
     ).execute()
 
 
-def write_tab_data(sheets_service, sheet_id: str, title: str, rows, color: bool = True) -> None:
-    """Write 8-column rows to a tab.
+def write_tab_data(sheets_service, sheet_id: str, title: str, rows, color: bool = True, header: list = None) -> None:
+    """Write rows to a tab.
 
-    Each row in `rows` is an 8-tuple in output column order:
-    (name, founder, email, telegram, pitch_deck, timestamp,
-    incorporated_raw, country_raw) -- copied verbatim from the source
-    form responses. These are reference columns for display only and never
-    feed the classifier. Clears the tab first so a re-run with fewer matches
-    in a bucket does not leave the previous run's longer list visible below
-    the new data. Always writes a header row, even when `rows` is empty, so
-    every tab has a consistent shape.
+    Each row in `rows` is a list whose length matches `header`. The full
+    source row (all columns) is copied verbatim — one row per startup, every
+    field. These are reference columns for display only and never feed the
+    classifier. Clears the tab first so a re-run with fewer matches in a
+    bucket does not leave the previous run's longer list visible below the
+    new data. Always writes a header row, even when `rows` is empty, so every
+    tab has a consistent shape.
+
+    `header` defaults to the legacy 8-column r2b layout for backward
+    compatibility; on the alchemist sheet all 16 source columns are passed
+    through. Rows shorter than the header are right-padded with empty strings
+    so every output row lines up with the header.
     """
-    values = [[
-        "Startup Name",
-        "Founder Name",
-        "Email",
-        "Telegram Handle",
-        "Pitch Deck",
-        "Timestamp",
-        "Where is your startup incorporated?",
-        "In which country is your startup physically headquartered?",
-    ]]
-    values.extend(list(row) for row in rows)
+    if header is None:
+        header = [
+            "Startup Name",
+            "Founder Name",
+            "Email",
+            "Telegram Handle",
+            "Pitch Deck",
+            "Timestamp",
+            "Where is your startup incorporated?",
+            "In which country is your startup physically headquartered?",
+        ]
+    width = len(header)
+    values = [list(header)]
+    for row in rows:
+        cells = list(row)
+        if len(cells) < width:
+            cells = cells + [""] * (width - len(cells))
+        elif len(cells) > width:
+            cells = cells[:width]
+        values.append(cells)
     # Clear any prior content across a generous range before writing.
     sheets_service.spreadsheets().values().clear(
         spreadsheetId=sheet_id,
