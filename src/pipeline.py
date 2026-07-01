@@ -340,7 +340,7 @@ def run_batch(config: Config, *, dry_run: bool = False, force: bool = False, lim
         # Country buckets are colored green (finalized); Human Review is not.
         review_tab = "Human Review"
         tab_writes = [
-            (title, grouped.get(bucket, []), True)
+            (title, grouped.get(bucket, []), False)
             for bucket, title in TARGET_TABS.items()
         ]
         tab_writes.append((review_tab, review_rows, False))

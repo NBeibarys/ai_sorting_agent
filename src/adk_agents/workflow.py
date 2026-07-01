@@ -134,14 +134,13 @@ class AdkSorterWorkflow:
             merged[rid] = (_safe_bucket(bucket), needs_review)
         return merged
 
-    def classify_batch(self, country_items: list[dict]) -> list[tuple[str, bool]]:
-        """Classify a batch of rows; return (bucket, needs_review) tuples in input order.
+    CHUNK_SIZE = 50  # 100+ hangs the LLM; 50 confirmed working (~25s)
 
-        Input:  [{"row_id": 0, "country_raw": "Astana"}, ...]
-        Output: [("Kazakhstan", False), ...] -- one (bucket, needs_review) per input, in row_id order.
+    def _classify_chunk(self, chunk: list[dict]) -> dict[int, tuple[str, bool]]:
+        """Classify a single chunk (≤50 rows) with retry loop. Returns row_id -> (bucket, needs_review).
 
-        Retry loop (max 2 iterations, 2-4 LLM calls total):
-          Iteration 1: classify ALL items + verify ALL items.
+        Retry loop (max 2 iterations, 2-4 LLM calls per chunk):
+          Iteration 1: classify ALL chunk items + verify ALL items.
           If the verifier rejects any rows, re-run ONLY the rejected subset
           through classifier + verifier (iteration 2). After max iterations the
           verifier's corrected_bucket is accepted for any still-rejected rows
@@ -149,23 +148,18 @@ class AdkSorterWorkflow:
           country_raw} -- no verifier feedback is injected (the classifier
           prompt has no {verifier_feedback} hook).
         """
-        if not country_items:
-            return []
-
         MAX_ITERATIONS = 2
         raw_by_id: dict[int, str] = {}
-        for item in country_items:
+        for item in chunk:
             try:
                 raw_by_id[int(item["row_id"])] = item.get("country_raw", "")
             except (KeyError, TypeError, ValueError):
                 continue
 
         merged: dict[int, tuple[str, bool]] = {}
-        active_items = country_items  # iteration 1 = every input row
-        for _iteration in range(MAX_ITERATIONS):
+        active_items = chunk  # iteration 1 = every input row
+        for iteration in range(MAX_ITERATIONS):
             classifications, verdicts = asyncio.run(self._invoke_async(active_items))
-            # _merge applies: approved -> classifier bucket; rejected ->
-            # corrected_bucket. Overwrites prior results for retried rows.
             merged.update(self._merge(classifications, verdicts, active_items))
 
             rejected_ids = [
@@ -183,6 +177,34 @@ class AdkSorterWorkflow:
             if not active_items:
                 break  # nothing retriable left
 
+        return merged
+
+    def classify_batch(self, country_items: list[dict]) -> list[tuple[str, bool]]:
+        """Classify a batch of rows; return (bucket, needs_review) tuples in input order.
+
+        Input:  [{"row_id": 0, "country_raw": "Astana"}, ...]
+        Output: [("Kazakhstan", False), ...] -- one (bucket, needs_review) per input, in row_id order.
+
+        Chunks input at CHUNK_SIZE (50) to avoid LLM hangs on large batches.
+        Each chunk runs independently with its own retry loop. Results are
+        concatenated in row_id order. Interface unchanged from non-chunked version.
+        """
+        if not country_items:
+            return []
+
+        total = len(country_items)
+        all_merged: dict[int, tuple[str, bool]] = {}
+
+        if total <= self.CHUNK_SIZE:
+            all_merged = self._classify_chunk(country_items)
+        else:
+            num_chunks = (total + self.CHUNK_SIZE - 1) // self.CHUNK_SIZE
+            for i in range(0, total, self.CHUNK_SIZE):
+                chunk = country_items[i:i + self.CHUNK_SIZE]
+                chunk_num = i // self.CHUNK_SIZE + 1
+                print(f"  [chunk {chunk_num}/{num_chunks}] classifying {len(chunk)} rows...", flush=True)
+                all_merged.update(self._classify_chunk(chunk))
+
         out = []
         for item in country_items:
             try:
@@ -190,7 +212,7 @@ class AdkSorterWorkflow:
             except (KeyError, TypeError, ValueError):
                 out.append(("Other", False))
                 continue
-            out.append(merged.get(rid, ("Other", False)))
+            out.append(all_merged.get(rid, ("Other", False)))
         return out
 
     def classify(self, country_raw: str) -> tuple[str, bool]:
