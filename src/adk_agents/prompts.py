@@ -51,12 +51,10 @@ RULES (apply to every input row, independently):
    ("we do not have one", "not yet established", "Moment no"), classify as
    "Other".
 5. PLANNED LOCATIONS: If the value describes a future plan or intention
-   ("planning on", "moving to", "will be", "not incorporated yet") that
-   includes a target country/city, classify by that target IF it is one of
-   the buckets above. If the target is not in the bucket list, classify as
-   "Human Review" (set needs_review=true). If the value mentions a location
-   in parentheses (e.g. "not incorporated yet (Almaty)"), use that location
-   as the physical HQ.
+   that includes a target country/city, classify by that target IF it is one
+   of the buckets above. If the target is not in the bucket list, classify
+   as "Human Review" (set needs_review=true). If the value mentions a
+   location in parentheses, use that location as the physical HQ.
 6. Never invent a country not implied by the text. When in doubt, "Other".
 7. AMBIGUITY FLAG: If the country value is ambiguous (multiple countries listed,
    "not yet established", unclear, or empty), set needs_review=true and assign the
