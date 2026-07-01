@@ -24,14 +24,12 @@ class Config:
     max_concurrency: int
     checkpoint_path: str
     country_column: str
-    country_label: str
     name_column: str
     founder_name_column: str
     email_column: str
     telegram_column: str
     pitch_deck_column: str
     dedup_column: str
-    output_columns: tuple
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -73,12 +71,6 @@ class Config:
             country_column=os.environ.get(
                 "SORTER_COUNTRY_COLUMN", "physically headquartered"
             ),
-            # Human-readable label injected into the classifier/verifier prompts
-            # ("incorporated" on the alchemist sheet, "physically headquartered"
-            # on the r2b sheet). Controls how the country field is described.
-            country_label=os.environ.get(
-                "SORTER_COUNTRY_LABEL", "physically headquartered"
-            ),
             name_column=os.environ.get("SORTER_NAME_COLUMN", "name of your startup"),
             founder_name_column=os.environ.get(
                 "SORTER_FOUNDER_NAME_COLUMN", "what is your name"
@@ -91,15 +83,4 @@ class Config:
                 "SORTER_PITCH_DECK_COLUMN", "pitch deck"
             ),
             dedup_column=os.environ.get("DEDUP_COLUMN", ""),
-            # Comma-separated display column names written to every output tab
-            # header. On the alchemist sheet all 16 source columns are carried
-            # through verbatim, one row per startup. Defaults to the 8-column
-            # r2b layout for backward compatibility.
-            output_columns=tuple(
-                c.strip() for c in os.environ.get(
-                    "OUTPUT_COLUMNS",
-                    "Startup Name,Founder Name,Email,Telegram Handle,"
-                    "Pitch Deck,Timestamp,Incorporated,HQ Country",
-                ).split(",")
-            ),
         )
