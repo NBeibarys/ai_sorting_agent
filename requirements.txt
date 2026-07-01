@@ -1,4 +1,11 @@
-# Core
-python-dotenv>=1.0.0
-openpyxl>=3.1.0
-google-genai>=1.0.0
+# Direct runtime dependencies are pinned to the versions validated together
+# (mirrors the sibling ai_fellowship_agent repo). Sheets I/O uses the Google
+# Sheets API; output tabs are written back into the source spreadsheet.
+google-adk==2.3.0
+google-genai==2.10.0
+google-api-python-client==2.198.0
+google-auth==2.55.0
+google-cloud-storage==3.12.0
+certifi==2026.2.25
+pydantic==2.13.4
+python-dotenv==1.2.2
