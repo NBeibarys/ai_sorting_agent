@@ -372,11 +372,17 @@ def run_batch(config: Config, *, dry_run: bool = False, force: bool = False, lim
                 print(f"WARNING: batch cell coloring failed ({len(green_coords)} green, {len(red_coords)} red cells): {exc}", flush=True)
         # Country buckets are colored green (finalized); Human Review is not.
         review_tab = "Human Review"
+        other_tab = "Other Countries"
         tab_writes = [
             (title, grouped.get(bucket, []), False)
             for bucket, title in TARGET_TABS.items()
         ]
         tab_writes.append((review_tab, review_rows, False))
+        # Non-target countries (Canada, China, Qatar, UAE, Japan, etc.) get
+        # their own visible tab. other_log rows are 9-tuples (8 display
+        # fields + bucket); strip the trailing bucket for write_tab_data,
+        # which expects the same 8-column format as every other tab.
+        tab_writes.append((other_tab, [r[:-1] for r in other_log], False))
         for title, rows, color in tab_writes:
             create_sheet_tab(sheets_service, config.sheet_id, title)
             write_tab_data(sheets_service, config.sheet_id, title, rows, color=color)
