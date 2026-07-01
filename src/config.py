@@ -29,6 +29,7 @@ class Config:
     email_column: str
     telegram_column: str
     pitch_deck_column: str
+    dedup_column: str
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -81,4 +82,5 @@ class Config:
             pitch_deck_column=os.environ.get(
                 "SORTER_PITCH_DECK_COLUMN", "pitch deck"
             ),
+            dedup_column=os.environ.get("DEDUP_COLUMN", ""),
         )

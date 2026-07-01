@@ -44,7 +44,7 @@ COL_NEEDLES = {
 }
 # Display-only reference columns: a missing needle yields "" instead of
 # crashing the whole batch -- same tolerance `incorporated` already has.
-OPTIONAL_NEEDLES = {"incorporated", "founder", "email", "telegram", "pitch_deck"}
+OPTIONAL_NEEDLES = {"incorporated", "founder", "email", "telegram", "pitch_deck", "dedup"}
 
 
 def _norm(text: str) -> str:
@@ -65,6 +65,7 @@ def _find_columns(header: list, config: Config) -> dict:
         "email": [config.email_column],
         "telegram": [config.telegram_column],
         "pitch_deck": [config.pitch_deck_column],
+        "dedup": [config.dedup_column],
     }
     lowered = [(_norm(h), i) for i, h in enumerate(header)]
     found = {}
@@ -271,6 +272,52 @@ def _read_csv_rows(path: str):
     return header, rows
 
 
+def _deduplicate_rows(row_meta: list, rows: list, dedup_col_idx, *, column_name: str) -> list:
+    """Drop duplicate rows by DEDUP_COLUMN value.
+
+    Matching is case-insensitive with whitespace stripped. Empty/null values
+    are NOT duplicates (every empty-dedup row is kept). Only the first
+    occurrence of each non-empty value is kept; later duplicates are dropped
+    entirely and excluded from classification and output.
+
+    `row_meta[i]` carries the original source row index in tuple position 0;
+    that index is preserved so source-cell coloring still maps to the right
+    row. `rows` is the raw source rows list so we can read the dedup cell
+    directly via `dedup_col_idx`.
+    """
+    if not column_name or dedup_col_idx is None:
+        return row_meta
+    seen: set = set()
+    unique: list = []
+    removed = 0
+    for meta_entry in row_meta:
+        i = meta_entry[0]
+        raw = ""
+        if 0 <= dedup_col_idx < len(rows[i]):
+            raw = (rows[i][dedup_col_idx] or "").strip()
+        key = raw.lower()
+        if not key:
+            # Empty / null -> never a duplicate; always keep.
+            unique.append(meta_entry)
+            continue
+        if key in seen:
+            removed += 1
+            continue
+        seen.add(key)
+        unique.append(meta_entry)
+    total = len(row_meta)
+    print(
+        f"Found {removed} duplicates in column '{column_name}', removing...",
+        flush=True,
+    )
+    print(
+        f"Deduplication: removed {removed} of {total} rows "
+        f"({len(unique)} unique remaining).",
+        flush=True,
+    )
+    return unique
+
+
 def run_batch(config: Config, *, dry_run: bool = False, force: bool = False, limit: int = 0):
     if dry_run:
         header, rows = _read_csv_rows(_DRY_RUN_CSV)
@@ -334,10 +381,24 @@ def run_batch(config: Config, *, dry_run: bool = False, force: bool = False, lim
              ts, incorporated_raw, country_raw)
         )
 
-    total = len(row_meta)
+    source_row_count = len(row_meta)
+
+    # Deduplicate BEFORE classification: drop later rows whose DEDUP_COLUMN
+    # value matches an earlier row (case-insensitive, whitespace stripped).
+    # Empty values are NOT duplicates. Duplicates never reach the LLM and are
+    # never written to output tabs. Original source row index `i` is preserved
+    # in each tuple so source-cell coloring still maps correctly.
+    dedup_col_idx = cols.get("dedup")
+    row_meta = _deduplicate_rows(
+        row_meta, rows, dedup_col_idx, column_name=config.dedup_column
+    )
+    total = len(row_meta)  # post-dedup count, used for reporting/summary
 
     # buckets[i] = (bucket, needs_review) for row index i (None until set).
-    buckets = [None] * total
+    # Sized by the SOURCE row count (pre-dedup): row_meta entries keep their
+    # original source index `i` (up to source_row_count-1) so cell coloring
+    # still maps to the correct source row.
+    buckets = [None] * source_row_count
     to_classify = []  # list of (row_index, {"row_id": row_index, "country_raw": ...})
     for (i, _name, _founder, _email, _telegram, _pitch_deck,
          _ts, _inc, country_raw) in row_meta:
@@ -351,7 +412,10 @@ def run_batch(config: Config, *, dry_run: bool = False, force: bool = False, lim
 
     if dry_run:
         for (i, _item) in to_classify:
-            country_raw = row_meta[i][8]
+            # Find this row's meta entry by source index i (row_meta is
+            # filtered post-dedup, so we can't index it by i directly).
+            meta = next((m for m in row_meta if m[0] == i), None)
+            country_raw = meta[8] if meta else ""
             try:
                 buckets[i] = (deterministic_classify(country_raw), False)
             except Exception as exc:
