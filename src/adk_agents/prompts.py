@@ -38,8 +38,18 @@ empty/nonsense values.
 
 RULES (apply to every input row, independently):
 1. Pick the SINGLE country where the startup is PHYSICALLY headquartered. If
-   multiple countries are listed, choose the primary HQ -- usually the first
-   mentioned.
+   multiple countries are listed, choose the primary HQ. The DECISIVE
+   tie-breaker is the ORDER the countries appear in the text: the FIRST
+   mentioned target-bucket country is the primary HQ. Do NOT overthink this
+   — first-mentioned-wins is a clear, deterministic rule, not a guess.
+   Examples (this is how a multi-country value MUST be classified):
+     "Chicago - Bishkek"               -> USA           (USA first)
+     "US/KZ"                           -> USA           (USA first)
+     "USA/Uzbekistan"                  -> USA           (USA first)
+     "Kazakhstan, Georgia"             -> Kazakhstan    (Kazakhstan first)
+     "Republic of Georgia and USA"     -> Georgia       (Georgia first)
+     "United States. ... Bishkek, ..." -> USA           (USA first)
+   needs_review MUST be false for every example above (see Rule 7).
 2. Match case-insensitively and accent-insensitively. REASON about the
    geography: if the value is a city name, determine which country that city
    is in. Recognize city names in ANY script (Latin, Cyrillic, local).
@@ -47,33 +57,51 @@ RULES (apply to every input row, independently):
    in the bucket descriptions above.
 3. "Georgia" means the COUNTRY (Caucasus), never the US state. A value like
    "Georgia (not US state)" or "Tbilisi" is Georgia.
-4. If the value is empty, nonsense, or explicitly states there is no HQ
-   ("we do not have one", "not yet established", "Moment no"), classify as
-   "Other".
+4. If the value states there is NO physical HQ yet ("we do not have one",
+   "not yet established", "Moment no", "operating remotely") AND lists NO
+   target-bucket country, classify as "Other". If it lists no HQ but DOES
+   list target-bucket countries, apply Rule 7 (it may be genuinely unclear).
 5. PLANNED LOCATIONS: If the value describes a future plan or intention
    that includes a target country/city, classify by that target IF it is one
    of the buckets above. If the target is not in the bucket list, classify
    as "Other". If the value mentions a location in parentheses, use that
    location as the physical HQ.
 6. Never invent a country not implied by the text. When in doubt, "Other".
-7. needs_review FLAG — set to true ONLY when the row genuinely needs a human
-   to decide the bucket because two or more DIFFERENT target-bucket countries
-   are listed and it is unclear which is the primary HQ (e.g. "Kazakhstan,
-   Georgia" with no indication which is primary). In all other cases
-   needs_review MUST be false. Specifically, needs_review=false for:
-   - A CLEAR single-country value (one city or one country, any script).
-     Example: "Петропавловск" -> Kazakhstan, needs_review=false.
-   - An EMPTY, NONSENSE, or explicit "no HQ" value ("N/A", "cscs",
-     "Moment no", "we do not have one", "not yet established"). These are
-     unambiguous "Other" — not ambiguous — so needs_review=false.
-   - A value mentioning multiple countries where ALL but one fall under
-     "Other" (e.g. "Kazakhstan / UK" -> Kazakhstan, needs_review=false,
-     because UK is "Other" and not a competing target bucket).
-   - A value mentioning multiple countries where it is clear which is the
-     primary HQ (usually the first mentioned).
-   needs_review=true is reserved for multi-country values where two or more
-   competing TARGET buckets are present and the primary HQ is genuinely
-   unclear from the text. When in doubt, prefer needs_review=false.
+7. needs_review FLAG — set to true ONLY for a row that genuinely needs a
+   human to decide the bucket because no clear primary HQ can be picked from
+   the text. In all other cases needs_review MUST be false. Decide
+   needs_review with this checklist, in order:
+
+   (a) Multi-country value where the FIRST mentioned target-bucket country
+       is identifiable -> pick that first country, needs_review=FALSE.
+       First-mentioned-wins (Rule 1) is a clear decision, NOT ambiguity.
+       Examples: "Chicago - Bishkek" -> USA (false); "Kazakhstan, Georgia"
+       -> Kazakhstan (false); "US/KZ" -> USA (false).
+
+   (b) Multi-country value where NO country is a target bucket (all are
+       "Other" countries like UK, Israel, Russia) -> "Other",
+       needs_review=FALSE (no competing target bucket, so no ambiguity).
+
+   (c) A CLEAR single-country value (one city or one country, any script)
+       -> that bucket, needs_review=FALSE.
+       Example: "Петропавловск" -> Kazakhstan, needs_review=false.
+
+   (d) An EMPTY, NONSENSE, or explicit "no HQ" value that lists no target
+       country ("N/A", "cscs", "Moment no", "we do not have one", "not yet
+       established") -> "Other", needs_review=FALSE. These are
+       unambiguous "Other", not ambiguous.
+
+   (e) needs_review=TRUE is reserved ONLY for rows where the text gives no
+       usable primary HQ AND lists two or more competing target-bucket
+       countries with no indication of which comes first. Examples that
+       qualify: "above countries" (no countries actually named); a value
+       that says "not yet established" and then lists several target
+       countries as scattered options rather than naming a primary HQ.
+       When in doubt, prefer needs_review=FALSE.
+
+   Summary: needs_review=true means "a human must read this because no
+   rule could pick a single bucket". needs_review=false means "a clear
+   rule (first-mentioned, single-country, all-Other, or no-HQ) decided it".
 
 OUTPUT FORMAT -- you MUST return a JSON object matching the BatchClassification
 schema:
@@ -124,6 +152,13 @@ VERIFICATION CHECKS (apply to every row):
 4. MISCLASSIFICATION: Did the classifier pick the wrong target bucket? For
    example, "Kyrgyzstan" for a Tashkent address (Uzbekistan), or "Turkiye" for a
    Baku address (Azerbaijan).
+5. MULTI-COUNTRY VALUES: When country_raw lists more than one country, the
+   correct bucket is the FIRST mentioned target-bucket country (the primary
+   HQ). Do NOT reject a correct first-mentioned bucket. "Chicago - Bishkek"
+   is correctly USA (Chicago/USA is first); "Kazakhstan, Georgia" is
+   correctly Kazakhstan; "US/KZ" is correctly USA. A bucket chosen by
+   first-mentioned-wins is correct — set approved=true. Do NOT mark such
+   rows for review; first-mentioned is a clear rule, not an ambiguity.
 
 DECISION RULES:
 - If a row is correct, set approved=true and leave feedback and corrected_bucket
@@ -133,6 +168,8 @@ DECISION RULES:
   bucket. Never leave corrected_bucket null when you reject.
 - "Other" is correct when country_raw is a genuinely foreign country or an
   empty/nonsense value; do not reject a correct "Other".
+- A first-mentioned target bucket on a multi-country value is correct; do not
+  reject it and do not flag it for human review.
 
 OUTPUT FORMAT -- you MUST return a JSON object matching the BatchVerdict schema:
   {{
