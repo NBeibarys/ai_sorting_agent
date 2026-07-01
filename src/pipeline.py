@@ -111,6 +111,28 @@ _COUNTRY_SYNONYMS = {
     "tajikistan": "Mong. Turkmenistan Tajikistan",
 }
 
+# MENA countries get their own output tab. Matched against the normalized
+# country_raw text with word boundaries so "oman" won't false-match
+# "Romania" and "uae" won't false-match substrings.
+MENA_SYNONYMS = [
+    "qatar",
+    "uae", "united arab emirates",
+    "oman",
+    "egypt",
+    "algeria", "algerie",
+    "jordan",
+    "pakistan",
+]
+
+
+def _is_mena(country_raw: str) -> bool:
+    """True if the country text names a MENA country (Qatar, UAE, Oman,
+    Egypt, Algeria, Jordan, Pakistan)."""
+    text = _norm(country_raw)
+    if not text:
+        return False
+    return any(re.search(rf"\b{re.escape(syn)}\b", text) for syn in MENA_SYNONYMS)
+
 
 def deterministic_classify(country_raw: str) -> str:
     """Local heuristic classifier -- only for --dry-run verification."""
@@ -162,25 +184,31 @@ def _checkpoint_entry(value):
 
 
 def _route_rows(row_meta, buckets, errored_indices, *, dry_run, header_row, name_col):
-    """Group classified rows into country buckets, a Human Review list, and the
-    Other/excluded log. Returns (grouped, review_rows, other_log, green_coords,
-    red_coords).
+    """Group classified rows into country buckets, a Human Review list, the
+    MENA list, and the Other/excluded log. Returns (grouped, review_rows,
+    mena_log, other_log, green_coords, red_coords).
 
     Each entry in `row_meta` is a 9-tuple:
     (i, name, founder, email, telegram, pitch_deck, ts, incorporated_raw,
-    country_raw). Output rows (grouped, review, other_log) carry the same 8
-    display fields in output-column order:
+    country_raw). Output rows (grouped, review, mena_log, other_log) carry the
+    same 8 display fields in output-column order:
     (name, founder, email, telegram, pitch_deck, ts, incorporated_raw,
     country_raw).
 
     Rows whose classifier flagged needs_review=True go to the Human Review list
     AND are marked RED in the source tab so an operator can spot rows awaiting
-    sign-off. Every other row keeps the prior behavior: bucket rows and Other
-    rows are marked emerald green in the source tab when not in dry-run and not
-    errored.
+    sign-off. Every other row keeps the prior behavior: bucket rows, MENA rows,
+    and Other rows are marked emerald green in the source tab when not in
+    dry-run and not errored.
+
+    Non-target rows whose country_raw matches a MENA country (Qatar, UAE, Oman,
+    Egypt, Algeria, Jordan, Pakistan) are routed to mena_log instead of
+    other_log, regardless of the classifier's bucket label, so they land in the
+    dedicated MENA tab. other_log keeps only non-target, non-MENA countries.
     """
     grouped = defaultdict(list)
     review_rows = []
+    mena_log = []
     other_log = []
     green_coords = []
     red_coords = []
@@ -200,14 +228,16 @@ def _route_rows(row_meta, buckets, errored_indices, *, dry_run, header_row, name
             continue
         if bucket in TARGET_TABS:
             grouped[bucket].append(out_row)
+        elif _is_mena(country_raw):
+            mena_log.append(out_row)
         else:
             other_log.append((*out_row, bucket))
         if not dry_run and i not in errored_indices:
             green_coords.append((header_row + i, name_col))
-    return grouped, review_rows, other_log, green_coords, red_coords
+    return grouped, review_rows, mena_log, other_log, green_coords, red_coords
 
 
-def _print_summary(grouped: dict, other_log: list, review_rows: list, total: int) -> None:
+def _print_summary(grouped: dict, other_log: list, review_rows: list, total: int, mena_log: list) -> None:
     print("\n=== Summary ===", flush=True)
     placed = 0
     for bucket in TARGET_TABS:
@@ -215,6 +245,7 @@ def _print_summary(grouped: dict, other_log: list, review_rows: list, total: int
         placed += n
         print(f"  {bucket:32s} {n}")
     print(f"  {'Human Review':32s} {len(review_rows)}")
+    print(f"  {'MENA':32s} {len(mena_log)}")
     print(f"  {'(excluded / Other)':32s} {len(other_log)}")
     print(f"  {'TOTAL rows':32s} {total}")
     if other_log:
@@ -356,12 +387,12 @@ def run_batch(config: Config, *, dry_run: bool = False, force: bool = False, lim
         except (IndexError, ValueError):
             pass
 
-    grouped, review_rows, other_log, green_coords, red_coords = _route_rows(
+    grouped, review_rows, mena_log, other_log, green_coords, red_coords = _route_rows(
         row_meta, buckets, errored_indices,
         dry_run=dry_run, header_row=header_row, name_col=cols["name"],
     )
 
-    _print_summary(grouped, other_log, review_rows, total)
+    _print_summary(grouped, other_log, review_rows, total, mena_log)
     if dry_run:
         print("\nDry-run: skipped sheet writes -- no tabs created or modified.", flush=True)
     else:
@@ -372,13 +403,18 @@ def run_batch(config: Config, *, dry_run: bool = False, force: bool = False, lim
                 print(f"WARNING: batch cell coloring failed ({len(green_coords)} green, {len(red_coords)} red cells): {exc}", flush=True)
         # Country buckets are colored green (finalized); Human Review is not.
         review_tab = "Human Review"
+        mena_tab = "MENA"
         other_tab = "Other Countries"
         tab_writes = [
             (title, grouped.get(bucket, []), False)
             for bucket, title in TARGET_TABS.items()
         ]
         tab_writes.append((review_tab, review_rows, False))
-        # Non-target countries (Canada, China, Qatar, UAE, Japan, etc.) get
+        # MENA countries (Qatar, UAE, Oman, Egypt, Algeria, Jordan, Pakistan)
+        # get their own visible tab. mena_log rows are 8-tuples in display
+        # column order -- same format as every other tab.
+        tab_writes.append((mena_tab, mena_log, False))
+        # Non-target, non-MENA countries (Canada, China, Japan, etc.) get
         # their own visible tab. other_log rows are 9-tuples (8 display
         # fields + bucket); strip the trailing bucket for write_tab_data,
         # which expects the same 8-column format as every other tab.
@@ -391,6 +427,7 @@ def run_batch(config: Config, *, dry_run: bool = False, force: bool = False, lim
         "classified": total - len(errors),
         "errors": errors,
         "excluded": len(other_log),
+        "mena": len(mena_log),
         "review": len(review_rows),
         "tabs": {b: len(grouped.get(b, [])) for b in TARGET_TABS},
     }
