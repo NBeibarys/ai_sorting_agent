@@ -68,19 +68,11 @@ class Config:
             model=os.environ.get("SORTER_MODEL", "gemini-3.5-flash"),
             max_concurrency=int(os.environ.get("MAX_CONCURRENCY", "8")),
             checkpoint_path=os.environ.get("CHECKPOINT_PATH", "checkpoint.json"),
-            country_column=os.environ.get(
-                "SORTER_COUNTRY_COLUMN", "physically headquartered"
-            ),
-            name_column=os.environ.get("SORTER_NAME_COLUMN", "name of your startup"),
-            founder_name_column=os.environ.get(
-                "SORTER_FOUNDER_NAME_COLUMN", "what is your name"
-            ),
-            email_column=os.environ.get("SORTER_EMAIL_COLUMN", "your email address"),
-            telegram_column=os.environ.get(
-                "SORTER_TELEGRAM_COLUMN", "your telegram handle"
-            ),
-            pitch_deck_column=os.environ.get(
-                "SORTER_PITCH_DECK_COLUMN", "pitch deck"
-            ),
-            dedup_column=os.environ.get("DEDUP_COLUMN", ""),
+            country_column="where is your startup incorporated",
+            name_column="startup name",
+            founder_name_column="full name of your ceo",
+            email_column="ceo's email",
+            telegram_column="telegram account",
+            pitch_deck_column="pitch deck",
+            dedup_column="Startup name",
         )

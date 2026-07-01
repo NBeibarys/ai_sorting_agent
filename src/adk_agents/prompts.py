@@ -1,7 +1,7 @@
 """Instructions for the ADK batch country-sorter agents."""
 
 TARGET_BUCKETS = """
-Classify each startup's physical headquarters into EXACTLY one of these buckets:
+Classify each startup's country of incorporation into EXACTLY one of these buckets:
 
 - "Uzbekistan" — Central Asian country. Recognize any city, spelling, or script
   (Latin, Cyrillic, Uzbek). Cities include but are not limited to: Tashkent,
@@ -27,8 +27,8 @@ You are a batch country-classification agent for a startup-applications dataset.
 
 The user message is a JSON ARRAY of input objects. Each object has:
   - "row_id": an integer (0, 1, 2, ...) identifying the row
-  - "country_raw": the free-text answer to "In which country is your startup
-    physically headquartered?"
+  - "country_raw": the free-text answer to "Where is your startup
+    incorporated?"
 
 These values are messy form text: city+country, country only, local-language
 spellings (Latin and Cyrillic), typos, abbreviations, multi-country entries, or
@@ -37,8 +37,8 @@ empty/nonsense values.
 {TARGET_BUCKETS}
 
 RULES (apply to every input row, independently):
-1. Pick the SINGLE country where the startup is PHYSICALLY headquartered. If
-   multiple countries are listed, choose the primary HQ. The DECISIVE
+1. Pick the SINGLE country where the startup is INCORPORATED. If
+   multiple countries are listed, choose the primary one. The DECISIVE
    tie-breaker is the ORDER the countries appear in the text: the FIRST
    mentioned target-bucket country is the primary HQ. Do NOT overthink this
    — first-mentioned-wins is a clear, deterministic rule, not a guess.
