@@ -3,23 +3,21 @@
 TARGET_BUCKETS = """
 Classify each startup's physical headquarters into EXACTLY one of these buckets:
 
-- "Uzbekistan" -- incl. cities (Tashkent, Samarkand, Andijan, Namangan, Fergana,
-  Nukus, Karakalpakstan) and any spelling (Uzbekistan, Ozbekiston, Uzbekiston,
-  Ozbekiston, etc.).
-- "Turkiye" -- incl. Istanbul, Ankara, Izmir and any spelling (Turkiye, Turkey,
+- "Uzbekistan" — Central Asian country. Recognize any city, spelling, or script
+  (Latin, Cyrillic, Uzbek). Cities include but are not limited to: Tashkent,
+  Samarkand, Andijan, Namangan, Fergana, Nukus, Karakalpakstan.
+- "Turkiye" — Includes Istanbul, Ankara, Izmir and any spelling (Turkiye, Turkey,
   TURKIYE, etc.).
-- "Georgia" -- the COUNTRY in the Caucasus (Tbilisi), NOT the US state.
-- "Kyrgyzstan" -- incl. Bishkek, Kyrgyz Republic.
-- "Azerbaijan" -- incl. Baku, Azarbaycan.
-- "USA" -- United States, incl. any US city (San Francisco, Chicago, Houston)
-  and spelling (US, USA, United States, United States of America).
-- "Kazakhstan" -- incl. Astana, Almaty, Karaganda, Uralsk, Petropavlovsk,
-  Shymkent, Aktobe, Pavlodar, Oskemen and any spelling (Kazakhstan, KZ,
-  Republic of Kazakhstan, Kazahstan, Kazakshtan, Қазақстан, Петропавловск,
-  Алматы, Астана, Шымкент).
-- "Mong. Turkmenistan Tajikistan" -- Mongolia OR Turkmenistan OR Tajikistan
+- "Georgia" — The COUNTRY in the Caucasus (Tbilisi), NOT the US state.
+- "Kyrgyzstan" — Includes Bishkek, Kyrgyz Republic.
+- "Azerbaijan" — Includes Baku, Azarbaycan.
+- "USA" — United States, including any US city and spelling (US, USA, United States).
+- "Kazakhstan" — Central Asian country. Recognize any city, spelling, or script
+  (Latin, Cyrillic, Kazakh). Cities include but are not limited to: Astana,
+  Almaty, Karaganda, Uralsk, Petropavlovsk, Shymkent, Aktobe, Pavlodar, Oskemen.
+- "Mong. Turkmenistan Tajikistan" — Mongolia OR Turkmenistan OR Tajikistan
   (Ulaanbaatar, Dushanbe, Ashgabat). This single bucket combines all three.
-- "Other" -- any country NOT listed above (Qatar, Ukraine, Russia, UAE, ...)
+- "Other" — any country NOT listed above (Qatar, Ukraine, Russia, UAE, ...)
   or no valid HQ (empty, "N/A", "we do not have one", "not yet established",
   nonsense like "cscs").
 """.strip()
@@ -42,11 +40,11 @@ RULES (apply to every input row, independently):
 1. Pick the SINGLE country where the startup is PHYSICALLY headquartered. If
    multiple countries are listed, choose the primary HQ -- usually the first
    mentioned.
-2. Match case-insensitively and accent-insensitively. Recognize city names:
-   "Astana"/"Almaty"/"Petropavlovsk"/"Shymkent" -> Kazakhstan, "Bishkek" -> Kyrgyzstan, "Tbilisi" ->
-   Georgia, "Baku" -> Azerbaijan, "Tashkent"/"Samarkand"/"Nukus"/"Andijan" ->
-   Uzbekistan, "Istanbul"/"Ankara"/"Izmir" -> Turkiye, "Ulaanbaatar" -> Mongolia
-   bucket, "Dushanbe" -> Tajikistan bucket, "Ashgabat" -> Turkmenistan bucket.
+2. Match case-insensitively and accent-insensitively. REASON about the
+   geography: if the value is a city name, determine which country that city
+   is in. Recognize city names in ANY script (Latin, Cyrillic, local).
+   Use your geographic knowledge — do not rely only on the examples listed
+   in the bucket descriptions above.
 3. "Georgia" means the COUNTRY (Caucasus), never the US state. A value like
    "Georgia (not US state)" or "Tbilisi" is Georgia.
 4. If the value is empty, nonsense, or explicitly states there is no HQ
@@ -92,12 +90,11 @@ and "country_raw"). Read each country_raw yourself; do not trust the classifier.
 {TARGET_BUCKETS}
 
 VERIFICATION CHECKS (apply to every row):
-1. CORRECT BUCKET: Is the classifier bucket correct for country_raw? Apply the
-   same city and spelling rules: "Astana"/"Almaty" -> Kazakhstan, "Bishkek" ->
-   Kyrgyzstan, "Tbilisi" -> Georgia, "Baku" -> Azerbaijan,
-   "Tashkent"/"Samarkand"/"Nukus"/"Andijan" -> Uzbekistan,
-   "Istanbul"/"Ankara"/"Izmir" -> Turkiye, "Ulaanbaatar" -> Mongolia bucket,
-   "Dushanbe" -> Tajikistan bucket, "Ashgabat" -> Turkmenistan bucket.
+1. CORRECT BUCKET: Is the classifier bucket correct for country_raw? REASON
+   about the geography: if the value is a city name, determine which country
+   that city is in. Recognize city names in ANY script (Latin, Cyrillic, local).
+   Use your geographic knowledge — do not rely only on the examples listed
+   in the bucket descriptions above.
    "Georgia" is the COUNTRY in the Caucasus, never the US state.
 2. HALLUCINATION: Is the classifier bucket one of the valid buckets above? Any
    invented or misspelled bucket (e.g. "UZB", "Tadjikistan", "Turkmen") fails.
