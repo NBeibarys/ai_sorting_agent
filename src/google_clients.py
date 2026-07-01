@@ -88,7 +88,7 @@ def create_sheet_tab(sheets_service, sheet_id: str, title: str) -> None:
     ).execute()
 
 
-def write_tab_data(sheets_service, sheet_id: str, title: str, rows) -> None:
+def write_tab_data(sheets_service, sheet_id: str, title: str, rows, color: bool = True) -> None:
     """Write [Startup Name, Timestamp, Incorporated, HQ Country] rows to a tab.
 
     Each row in `rows` is a 4-tuple (name, timestamp, incorporated_raw,
@@ -127,8 +127,10 @@ def write_tab_data(sheets_service, sheet_id: str, title: str, rows) -> None:
     # Tabs are addressed by their integer sheetId (not title), so resolve
     # this tab's sheetId by matching its title against the spreadsheet's
     # sheet properties (same lookup create_sheet_tab performs).
+    # Only color the name column when `color` is set. The Human Review tab
+    # is written with color=False so its rows stay unstyled (not finalized).
     num_data_rows = len(values) - 1
-    if num_data_rows > 0:
+    if color and num_data_rows > 0:
         meta = (
             sheets_service.spreadsheets()
             .get(spreadsheetId=sheet_id, fields="sheets/properties")
@@ -225,4 +227,51 @@ def color_name_cell(sheets_service, spreadsheet_id, sheet_id_int, row_index, col
                 }
             ]
         },
+    ).execute()
+
+
+def color_cells_batch(sheets_service, spreadsheet_id, sheet_id_int, green_coords, red_coords):
+    """Color cells emerald green or pleasant red in a single batchUpdate call.
+
+    Same per-cell formatting as color_name_cell(), but batches every cell into
+    ONE spreadsheets().batchUpdate() request so coloring N rows costs 1 API
+    call instead of N. The Sheets write quota is 60/min; the per-row variant
+    burned through it on a ~687-row run and 429'd the downstream tab writes.
+
+    green_coords: list of (row_index, col_index) 0-indexed tuples colored
+    emerald green (red=0.0, green=0.804, blue=0.4) -- normal classifications.
+    red_coords: list of (row_index, col_index) 0-indexed tuples colored
+    pleasant red (red=0.9, green=0.2, blue=0.2) -- Human Review rows.
+    """
+    if not green_coords and not red_coords:
+        return
+
+    def _repeat_cell(row_index, col_index, rgb):
+        return {
+            "repeatCell": {
+                "range": {
+                    "sheetId": sheet_id_int,
+                    "startRowIndex": row_index,
+                    "endRowIndex": row_index + 1,
+                    "startColumnIndex": col_index,
+                    "endColumnIndex": col_index + 1,
+                },
+                "cell": {
+                    "userEnteredFormat": {
+                        "backgroundColor": rgb
+                    }
+                },
+                "fields": "userEnteredFormat.backgroundColor",
+            }
+        }
+
+    GREEN = {"red": 0.0, "green": 0.804, "blue": 0.4}
+    RED = {"red": 0.9, "green": 0.2, "blue": 0.2}
+    requests = (
+        [_repeat_cell(r, c, GREEN) for r, c in green_coords]
+        + [_repeat_cell(r, c, RED) for r, c in red_coords]
+    )
+    sheets_service.spreadsheets().batchUpdate(
+        spreadsheetId=spreadsheet_id,
+        body={"requests": requests},
     ).execute()

@@ -1,4 +1,12 @@
-"""Synchronous batch-facing wrapper around the asynchronous ADK workflow."""
+"""Synchronous batch wrapper around the asynchronous ADK batch workflow.
+
+A single classify_batch() call sends ALL rows to the classifier+verifier
+SequentialAgent (2 LLM calls) and applies verifier corrections in Python. If
+the verifier rejects any rows, a retry loop (max 2 iterations) re-runs ONLY
+the rejected subset (2 more LLM calls). Total: 2-4 LLM calls for the whole
+dataset regardless of row count, replacing the old per-row loop (one ADK
+invocation per row = up to 1374 calls for 687 rows).
+"""
 import asyncio
 import json
 import os
@@ -14,29 +22,39 @@ from .agent import build_root_agent
 
 APP_NAME = "startup_country_sorter"
 
+_VALID_BUCKETS = (
+    "Uzbekistan", "Turkiye", "Georgia", "Kyrgyzstan", "Azerbaijan",
+    "USA", "Kazakhstan", "Mong. Turkmenistan Tajikistan", "Other",
+)
 
-def _as_dict(value) -> dict:
-    """Normalize ADK structured output (Pydantic / dict / JSON str) to dict."""
+
+def _as_dict(value):
+    """Normalize ADK structured output (Pydantic / dict / list / JSON str)."""
     if hasattr(value, "model_dump"):
         return value.model_dump()
-    if isinstance(value, dict):
+    if isinstance(value, (dict, list)):
         return value
     if isinstance(value, str):
         return json.loads(value)
+    if value is None:
+        return None
     raise ValueError(f"Unsupported structured agent output: {type(value).__name__}")
 
 
+def _safe_bucket(bucket) -> str:
+    """Coerce to a valid bucket string, defaulting to Other."""
+    return bucket if bucket in _VALID_BUCKETS else "Other"
+
+
 class AdkSorterWorkflow:
-    """Owns only immutable configuration; batch threads must not share state."""
+    """Owns only immutable configuration; each invocation is isolated."""
 
     def __init__(self, model: str):
-        # certifi provides a consistent trust store across Windows deployments.
         os.environ["SSL_CERT_FILE"] = certifi.where()
         self.model = model
 
-    async def _invoke_async(
-        self, country_raw: str
-    ) -> dict:
+    async def _invoke_async(self, country_items: list[dict]) -> tuple[dict, dict]:
+        """Run classifier -> verifier on a batch. Returns (cls_by_row_id, ver_by_row_id)."""
         session_service = InMemorySessionService()
         runner = Runner(
             app_name=APP_NAME,
@@ -44,76 +62,137 @@ class AdkSorterWorkflow:
             session_service=session_service,
         )
         session_id = uuid.uuid4().hex
-        # Seed loop-control state so the classifier sees empty feedback on the
-        # first attempt and the gate can route deterministically. Mirrors the
-        # sibling fellowship repo's initial_state pattern.
-        initial_state = {
-            "verifier_feedback": "",
-            "attempt": 1,
-            "review_approved": False,
-        }
         await session_service.create_session(
-            app_name=APP_NAME,
-            user_id="sorter",
-            session_id=session_id,
-            state=initial_state,
+            app_name=APP_NAME, user_id="sorter", session_id=session_id,
         )
-
-        payload = {"country_raw": country_raw}
+        payload = json.dumps(country_items, ensure_ascii=False)
         new_message = types.Content(
-            role="user",
-            parts=[types.Part(text=json.dumps(payload, ensure_ascii=False))],
+            role="user", parts=[types.Part(text=payload)],
         )
-        # Loop runs classifier+verifier per iteration (the gate is zero-model),
-        # so two iterations cost up to 4 LLM calls; 5 leaves headroom.
         async for _event in runner.run_async(
-            user_id="sorter",
-            session_id=session_id,
-            new_message=new_message,
-            run_config=RunConfig(max_llm_calls=5),
+            user_id="sorter", session_id=session_id,
+            new_message=new_message, run_config=RunConfig(max_llm_calls=6),
         ):
             pass
 
         session = await session_service.get_session(
-            app_name=APP_NAME, user_id="sorter", session_id=session_id
+            app_name=APP_NAME, user_id="sorter", session_id=session_id,
         )
         if session is None:
             raise RuntimeError("ADK session disappeared before result collection.")
 
-        classifier_result = _as_dict(session.state.get("classifier_result", {}))
-        verifier_verdict = _as_dict(session.state.get("verifier_verdict", {}))
-        approved = bool(verifier_verdict.get("approved"))
-        corrected = verifier_verdict.get("corrected_bucket")
+        batch_cls = _as_dict(session.state.get("batch_classifications")) or {}
+        batch_ver = _as_dict(session.state.get("batch_verdicts")) or {}
+        if not isinstance(batch_cls, dict):
+            batch_cls = {}
+        if not isinstance(batch_ver, dict):
+            batch_ver = {}
 
-        if approved:
-            # Verifier accepted: trust the classifier bucket.
-            bucket = classifier_result.get("country_bucket", "Other")
-        elif corrected:
-            # Verifier rejected and supplied the correct bucket. This covers
-            # both a mid-loop rejection and the loop exhausting after two
-            # rejected attempts — either way the verifier's correction wins.
-            bucket = corrected
-        else:
-            # Rejected without a correction (or loop ran dry): fall back to
-            # the last classifier result rather than inventing a bucket.
-            bucket = classifier_result.get("country_bucket", "Other")
+        classifications = self._index_by_row_id(batch_cls.get("items", []))
+        verdicts = self._index_by_row_id(batch_ver.get("items", []))
+        return classifications, verdicts
 
-        return {
-            "country_bucket": bucket,
-            "confidence": classifier_result.get("confidence"),
-            "notes": classifier_result.get("notes"),
-            "approved": approved,
-            "corrected_bucket": corrected,
-            "attempts": session.state.get("attempt"),
-        }
+    @staticmethod
+    def _index_by_row_id(items) -> dict:
+        indexed = {}
+        for item in items or []:
+            if not isinstance(item, dict):
+                continue
+            rid = item.get("row_id")
+            if rid is None:
+                continue
+            try:
+                indexed[int(rid)] = item
+            except (TypeError, ValueError):
+                continue
+        return indexed
 
-    def classify(self, country_raw: str) -> str:
-        """Return the canonical bucket string for one raw HQ-country value."""
-        result = asyncio.run(self._invoke_async(country_raw))
-        bucket = result.get("country_bucket", "Other")
-        if bucket not in (
-            "Uzbekistan", "Turkiye", "Georgia", "Kyrgyzstan", "Azerbaijan",
-            "USA", "Kazakhstan", "Mong. Turkmenistan Tajikistan", "Other",
-        ):
-            bucket = "Other"
-        return bucket
+    @staticmethod
+    def _merge(cls_map: dict, ver_map: dict, items: list[dict]) -> dict:
+        """row_id -> (final_bucket, needs_review), applying verifier corrections.
+
+        needs_review is the classifier's ambiguity flag and is preserved even
+        when the verifier corrects the bucket, so ambiguous rows still surface
+        for human review.
+        """
+        merged = {}
+        for item in items:
+            try:
+                rid = int(item["row_id"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            verdict = ver_map.get(rid, {})
+            cls = cls_map.get(rid, {})
+            approved = bool(verdict.get("approved"))
+            if approved:
+                bucket = cls.get("country_bucket")
+            elif verdict.get("corrected_bucket"):
+                bucket = verdict["corrected_bucket"]
+            else:
+                bucket = cls.get("country_bucket")
+            needs_review = bool(cls.get("needs_review", False))
+            merged[rid] = (_safe_bucket(bucket), needs_review)
+        return merged
+
+    def classify_batch(self, country_items: list[dict]) -> list[tuple[str, bool]]:
+        """Classify a batch of rows; return (bucket, needs_review) tuples in input order.
+
+        Input:  [{"row_id": 0, "country_raw": "Astana"}, ...]
+        Output: [("Kazakhstan", False), ...] -- one (bucket, needs_review) per input, in row_id order.
+
+        Retry loop (max 2 iterations, 2-4 LLM calls total):
+          Iteration 1: classify ALL items + verify ALL items.
+          If the verifier rejects any rows, re-run ONLY the rejected subset
+          through classifier + verifier (iteration 2). After max iterations the
+          verifier's corrected_bucket is accepted for any still-rejected rows
+          (applied in _merge). The LLM payload is always only {row_id,
+          country_raw} -- no verifier feedback is injected (the classifier
+          prompt has no {verifier_feedback} hook).
+        """
+        if not country_items:
+            return []
+
+        MAX_ITERATIONS = 2
+        raw_by_id: dict[int, str] = {}
+        for item in country_items:
+            try:
+                raw_by_id[int(item["row_id"])] = item.get("country_raw", "")
+            except (KeyError, TypeError, ValueError):
+                continue
+
+        merged: dict[int, tuple[str, bool]] = {}
+        active_items = country_items  # iteration 1 = every input row
+        for _iteration in range(MAX_ITERATIONS):
+            classifications, verdicts = asyncio.run(self._invoke_async(active_items))
+            # _merge applies: approved -> classifier bucket; rejected ->
+            # corrected_bucket. Overwrites prior results for retried rows.
+            merged.update(self._merge(classifications, verdicts, active_items))
+
+            rejected_ids = [
+                rid for rid, v in verdicts.items() if not bool(v.get("approved"))
+            ]
+            if not rejected_ids:
+                break  # every active row approved -> done
+
+            # Next iteration re-runs ONLY the verifier-rejected subset.
+            active_items = [
+                {"row_id": rid, "country_raw": raw_by_id.get(rid, "")}
+                for rid in rejected_ids
+                if rid in raw_by_id
+            ]
+            if not active_items:
+                break  # nothing retriable left
+
+        out = []
+        for item in country_items:
+            try:
+                rid = int(item["row_id"])
+            except (KeyError, TypeError, ValueError):
+                out.append(("Other", False))
+                continue
+            out.append(merged.get(rid, ("Other", False)))
+        return out
+
+    def classify(self, country_raw: str) -> tuple[str, bool]:
+        """Single-row wrapper around classify_batch (for --limit 1 testing)."""
+        return self.classify_batch([{"row_id": 0, "country_raw": country_raw}])[0]
