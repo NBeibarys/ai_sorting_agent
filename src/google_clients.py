@@ -232,19 +232,41 @@ def color_name_cell(sheets_service, spreadsheet_id, sheet_id_int, row_index, col
     ).execute()
 
 
-def color_cells_batch(sheets_service, spreadsheet_id, sheet_id_int, green_coords, red_coords):
-    """Color cells emerald green or pleasant red in a single batchUpdate call.
+def color_cells_batch(
+    sheets_service,
+    spreadsheet_id,
+    sheet_id_int,
+    green_coords,
+    red_coords,
+    *,
+    chunk_size=50,
+    max_retries=4,
+):
+    """Color cells emerald green or pleasant red in chunked batchUpdate calls.
 
     Same per-cell formatting as color_name_cell(), but batches every cell into
-    ONE spreadsheets().batchUpdate() request so coloring N rows costs 1 API
-    call instead of N. The Sheets write quota is 60/min; the per-row variant
-    burned through it on a ~687-row run and 429'd the downstream tab writes.
+    spreadsheets().batchUpdate() calls so coloring N rows costs ceil(N/50)
+    API calls instead of N. The Sheets write quota is 60/min; the per-row
+    variant burned through it on a ~687-row run and 429'd the downstream tab
+    writes.
+
+    A single batchUpdate with all 687 requests at once exceeds Google's per-
+    request payload/SSL limits and fails with http2/SSL EOF errors on large
+    datasets. The requests are therefore split into chunks of `chunk_size`
+    (default 50) repeatCell requests, each sent as its own batchUpdate call.
+    Transient transport errors (ssl.SSLError, ConnectionError, TimeoutError,
+    googleapiclient HttpError 5xx) are retried with exponential backoff.
 
     green_coords: list of (row_index, col_index) 0-indexed tuples colored
     emerald green (red=0.0, green=0.804, blue=0.4) -- normal classifications.
     red_coords: list of (row_index, col_index) 0-indexed tuples colored
     pleasant red (red=0.9, green=0.2, blue=0.2) -- Human Review rows.
     """
+    import ssl
+    import time
+
+    from googleapiclient.errors import HttpError
+
     if not green_coords and not red_coords:
         return
 
@@ -273,7 +295,44 @@ def color_cells_batch(sheets_service, spreadsheet_id, sheet_id_int, green_coords
         [_repeat_cell(r, c, GREEN) for r, c in green_coords]
         + [_repeat_cell(r, c, RED) for r, c in red_coords]
     )
-    sheets_service.spreadsheets().batchUpdate(
-        spreadsheetId=spreadsheet_id,
-        body={"requests": requests},
-    ).execute()
+
+    def _is_transient(exc):
+        if isinstance(exc, (ssl.SSLError, ConnectionError, TimeoutError)):
+            return True
+        if isinstance(exc, HttpError):
+            status = getattr(exc, "resp", None)
+            status = getattr(status, "status", None) if status else None
+            try:
+                return int(status) >= 500 if status else False
+            except (TypeError, ValueError):
+                return False
+        # googleapiclient may surface transport errors as generic Exception
+        # wrapping an SSLError; treat EOF/transport markers as transient.
+        msg = str(exc).lower()
+        return any(
+            m in msg
+            for m in ("ssl", "eof", "connection reset", "broken pipe", "timed out")
+        )
+
+    total_chunks = (len(requests) + chunk_size - 1) // chunk_size
+    for ci in range(0, len(requests), chunk_size):
+        chunk = requests[ci : ci + chunk_size]
+        chunk_num = ci // chunk_size + 1
+        for attempt in range(1, max_retries + 1):
+            try:
+                sheets_service.spreadsheets().batchUpdate(
+                    spreadsheetId=spreadsheet_id,
+                    body={"requests": chunk},
+                ).execute()
+                break
+            except Exception as exc:
+                if attempt == max_retries or not _is_transient(exc):
+                    raise
+                backoff = 2 ** (attempt - 1)
+                print(
+                    f"WARNING: batchUpdate chunk {chunk_num}/{total_chunks} "
+                    f"failed (attempt {attempt}/{max_retries}): "
+                    f"{type(exc).__name__}: {exc} -- retrying in {backoff}s",
+                    flush=True,
+                )
+                time.sleep(backoff)

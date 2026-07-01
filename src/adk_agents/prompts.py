@@ -53,13 +53,27 @@ RULES (apply to every input row, independently):
 5. PLANNED LOCATIONS: If the value describes a future plan or intention
    that includes a target country/city, classify by that target IF it is one
    of the buckets above. If the target is not in the bucket list, classify
-   as "Human Review" (set needs_review=true). If the value mentions a
-   location in parentheses, use that location as the physical HQ.
+   as "Other". If the value mentions a location in parentheses, use that
+   location as the physical HQ.
 6. Never invent a country not implied by the text. When in doubt, "Other".
-7. AMBIGUITY FLAG: If the country value is ambiguous (multiple countries listed,
-   "not yet established", unclear, or empty), set needs_review=true and assign the
-   most likely bucket OR "Other". Clear, single-country values must have
-   needs_review=false.
+7. needs_review FLAG — set to true ONLY when the row genuinely needs a human
+   to decide the bucket because two or more DIFFERENT target-bucket countries
+   are listed and it is unclear which is the primary HQ (e.g. "Kazakhstan,
+   Georgia" with no indication which is primary). In all other cases
+   needs_review MUST be false. Specifically, needs_review=false for:
+   - A CLEAR single-country value (one city or one country, any script).
+     Example: "Петропавловск" -> Kazakhstan, needs_review=false.
+   - An EMPTY, NONSENSE, or explicit "no HQ" value ("N/A", "cscs",
+     "Moment no", "we do not have one", "not yet established"). These are
+     unambiguous "Other" — not ambiguous — so needs_review=false.
+   - A value mentioning multiple countries where ALL but one fall under
+     "Other" (e.g. "Kazakhstan / UK" -> Kazakhstan, needs_review=false,
+     because UK is "Other" and not a competing target bucket).
+   - A value mentioning multiple countries where it is clear which is the
+     primary HQ (usually the first mentioned).
+   needs_review=true is reserved for multi-country values where two or more
+   competing TARGET buckets are present and the primary HQ is genuinely
+   unclear from the text. When in doubt, prefer needs_review=false.
 
 OUTPUT FORMAT -- you MUST return a JSON object matching the BatchClassification
 schema:
