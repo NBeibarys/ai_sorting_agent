@@ -446,7 +446,12 @@ def run_batch(config: Config, *, dry_run: bool = False, force: bool = False, lim
             flush=True,
         )
 
-    source_row_count = len(row_meta)
+    # Size buckets by the ORIGINAL source row count, not the filtered
+    # row_meta length. buckets[i] is indexed by the source row index i
+    # from enumerate(rows), which can exceed len(row_meta) when blank
+    # rows are skipped. Blank rows' buckets[i] stay None and are never
+    # accessed because they never reach classification or routing.
+    source_row_count = len(rows)
 
     # Deduplicate BEFORE classification: drop later rows whose DEDUP_COLUMN
     # value matches an earlier row (case-insensitive, whitespace stripped).
