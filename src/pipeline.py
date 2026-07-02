@@ -402,12 +402,23 @@ def run_batch(config: Config, *, dry_run: bool = False, force: bool = False, lim
     # 9-tuple: (i, name, founder, email, telegram, pitch_deck, ts,
     # incorporated_raw, country_raw). The 8 display fields after `i` are
     # written verbatim into output tabs in this order.
+    #
+    # Blank-row gate: skip rows whose Startup Name cell is empty. Fully blank
+    # rows (no startup name, no data) used to flow through to the LLM, get
+    # misclassified as a target country, land in an output tab, and get colored
+    # green -- all because nothing checked "is this actually a startup?".
+    # Filtering here prevents blank rows from ever reaching classification,
+    # routing, output tabs, or source-cell coloring.
     def _opt(idx):
         return _cell(row, idx) if idx is not None else ""
 
+    blank_skipped = 0
     row_meta = []
     for i, row in enumerate(rows):
         name = _cell(row, cols["name"])
+        if not name:
+            blank_skipped += 1
+            continue
         founder = _opt(cols.get("founder"))
         email = _opt(cols.get("email"))
         telegram = _opt(cols.get("telegram"))
@@ -418,6 +429,12 @@ def run_batch(config: Config, *, dry_run: bool = False, force: bool = False, lim
         row_meta.append(
             (i, name, founder, email, telegram, pitch_deck,
              ts, incorporated_raw, country_raw)
+        )
+    if blank_skipped:
+        print(
+            f"Skipped {blank_skipped} blank rows (empty Startup Name) "
+            f"before classification.",
+            flush=True,
         )
 
     source_row_count = len(row_meta)
