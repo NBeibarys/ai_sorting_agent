@@ -68,7 +68,7 @@ class Config:
             model=os.environ.get("SORTER_MODEL", "gemini-3.5-flash"),
             max_concurrency=int(os.environ.get("MAX_CONCURRENCY", "8")),
             checkpoint_path=os.environ.get("CHECKPOINT_PATH", "checkpoint.json"),
-            country_column="where is your startup incorporated",
+            country_column="which country do most of your team members come from",
             name_column="startup name",
             founder_name_column="full name of your ceo",
             email_column="ceo's email",
