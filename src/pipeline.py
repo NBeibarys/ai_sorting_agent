@@ -423,10 +423,28 @@ def run_batch(config: Config, *, dry_run: bool = False, force: bool = False, lim
     # row (all 16 columns) copied verbatim into output tabs -- one row per
     # startup, every field. The source index `i` is preserved so source-cell
     # coloring still maps correctly.
+    #
+    # Blank-row gate: skip rows whose Startup Name cell is empty. Fully blank
+    # rows (no startup name, no data) used to flow through to the LLM, get
+    # misclassified as a target country, land in an output tab, and get colored
+    # green -- all because nothing checked "is this actually a startup?".
+    # Filtering here prevents blank rows from ever reaching classification,
+    # routing, output tabs, or source-cell coloring.
+    blank_skipped = 0
     row_meta = []
     for i, row in enumerate(rows):
+        startup_name = _cell(row, cols["name"])
+        if not startup_name:
+            blank_skipped += 1
+            continue
         country_raw = _cell(row, cols["country"])
         row_meta.append((i, country_raw, list(row)))
+    if blank_skipped:
+        print(
+            f"Skipped {blank_skipped} blank rows (empty Startup Name) "
+            f"before classification.",
+            flush=True,
+        )
 
     source_row_count = len(row_meta)
 
