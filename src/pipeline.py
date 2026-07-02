@@ -338,6 +338,45 @@ def _deduplicate_rows(row_meta: list, rows: list, dedup_col_idx, *, column_name:
     return unique
 
 
+def write_total_statistics(sheets_service, sheet_id: str) -> None:
+    """Write a 'Total Statistics' tab with per-country startup counts.
+
+    Reads every output tab the pipeline just wrote (one per target
+    country, plus Human Review, MENA, and Other Countries), counts the
+    data rows in each (excluding the header row), and writes a new
+    'Total Statistics' tab with columns Country | Count sorted by count
+    descending, with a 'Total' row at the bottom holding the sum.
+
+    Reading the tabs back from the sheet (rather than reusing the
+    in-memory buckets) verifies the writes actually landed and reflects
+    the true on-disk state.
+    """
+    stats_tabs = list(TARGET_TABS.keys()) + ["Human Review", "MENA", "Other Countries"]
+    counts = []
+    for title in stats_tabs:
+        try:
+            _header, rows = read_sheet_rows(sheets_service, sheet_id, title)
+        except Exception as exc:
+            print(f"WARNING: could not read tab '{title}' for stats: {exc}", flush=True)
+            rows = []
+        counts.append((title, len(rows)))
+    # Sort by count descending; ties keep insertion order (stable sort).
+    counts.sort(key=lambda x: x[1], reverse=True)
+    total = sum(n for _, n in counts)
+    stats_rows = [[country, n] for country, n in counts]
+    stats_rows.append(["Total", total])
+    create_sheet_tab(sheets_service, sheet_id, "Total Statistics")
+    write_tab_data(
+        sheets_service, sheet_id, "Total Statistics",
+        stats_rows, color=False, header=["Country", "Count"],
+    )
+    print(
+        f"\nWrote 'Total Statistics' tab ({len(counts)} countries, "
+        f"{total} total startups).",
+        flush=True,
+    )
+
+
 def run_batch(config: Config, *, dry_run: bool = False, force: bool = False, limit: int = 0):
     if dry_run:
         header, rows = _read_csv_rows(_DRY_RUN_CSV)
@@ -494,6 +533,13 @@ def run_batch(config: Config, *, dry_run: bool = False, force: bool = False, lim
             create_sheet_tab(sheets_service, config.sheet_id, title)
             write_tab_data(sheets_service, config.sheet_id, title, rows, color=color, header=OUTPUT_HEADER)
         print(f"\nWrote {len(tab_writes)} tabs into sheet {config.sheet_id}", flush=True)
+        # Total Statistics: country -> startup count, sorted desc, with a
+        # Total row. Reads every output tab back from the sheet after all
+        # writes + coloring are done so the counts reflect the final state.
+        try:
+            write_total_statistics(sheets_service, config.sheet_id)
+        except Exception as exc:
+            print(f"WARNING: write_total_statistics failed: {type(exc).__name__}: {exc}", flush=True)
     return {
         "classified": total - len(errors),
         "errors": errors,
