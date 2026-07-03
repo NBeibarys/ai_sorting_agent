@@ -275,6 +275,36 @@ def _run_classify_with_selections(config: Config, selected_countries: list[str])
         pipeline_mod._is_mena = orig_is_mena
 
 
+class _StreamlitStream:
+    """A file-like stdout replacement that streams pipeline output to a
+    Streamlit st.status() container in real-time.
+
+    Pipeline functions (run_batch, _print_summary, etc.) print progress
+    messages via print(..., flush=True). This class intercepts those
+    writes and renders each completed line via st.text() so the user
+    sees progress as it happens, not after run_batch() returns.
+    """
+
+    def __init__(self):
+        self._buf = ""
+
+    def write(self, text: str) -> int:
+        self._buf += text
+        while "\n" in self._buf:
+            line, self._buf = self._buf.split("\n", 1)
+            if line.strip():
+                st.text(line)
+        return len(text)
+
+    def flush(self) -> None:
+        if self._buf.strip():
+            st.text(self._buf)
+        self._buf = ""
+
+    def isatty(self) -> bool:
+        return False
+
+
 # ── Main ────────────────────────────────────────────────────────────────
 
 def main():
@@ -391,47 +421,70 @@ def main():
             sheet_id, tab, classify_col, dedup_col, sheet_name,
             name_col, founder_col, email_col, telegram_col, pitch_deck_col,
         )
+
+        # BEFORE: compute counts so the user knows what's about to happen.
         cp_before = len(_load_checkpoint(config.checkpoint_path))
+        try:
+            _, src_rows = _read_tab(sheet_id, tab)
+            total_rows = len(src_rows)
+        except Exception:
+            total_rows = 0
 
-        error_msg = None
-        result = None
-        captured = io.StringIO()
-        old_stdout = sys.stdout
-        sys.stdout = captured
+        new_to_classify = max(total_rows - cp_before, 0)
 
-        with st.status("Classifying new rows...", expanded=True) as status:
-            try:
-                result = _run_classify_with_selections(config, selected_countries)
-            except Exception as exc:
-                error_msg = f"{type(exc).__name__}: {exc}"
-            finally:
-                sys.stdout = old_stdout
+        # If the checkpoint already covers all source rows, there's nothing
+        # to do — tell the user immediately without running the pipeline.
+        if new_to_classify == 0 and total_rows > 0:
+            st.info(
+                f"No new rows to classify. All {total_rows} rows are "
+                f"already in the checkpoint."
+            )
+        else:
+            with st.status("Classifying new rows...", expanded=True) as status:
+                if total_rows > 0:
+                    st.write(
+                        f"Total rows: {total_rows} | Already classified: "
+                        f"{cp_before} | New rows to classify: "
+                        f"{new_to_classify}"
+                    )
 
-            if error_msg:
-                st.error(f"Classification failed: {error_msg}")
-                status.update(label="Classification failed", state="error")
-            else:
-                # Show captured pipeline output as progress messages.
-                for line in captured.getvalue().splitlines():
-                    if line.strip():
-                        st.text(line)
+                error_msg = None
+                result = None
+                stream = _StreamlitStream()
+                old_stdout = sys.stdout
+                sys.stdout = stream
+                try:
+                    result = _run_classify_with_selections(
+                        config, selected_countries
+                    )
+                except Exception as exc:
+                    error_msg = f"{type(exc).__name__}: {exc}"
+                finally:
+                    sys.stdout = old_stdout
+                    stream.flush()
 
-                cp_after = len(_load_checkpoint(config.checkpoint_path))
-                new_rows = cp_after - cp_before
+                if error_msg:
+                    st.error(f"Classification failed: {error_msg}")
+                    status.update(
+                        label="Classification failed", state="error"
+                    )
+                else:
+                    cp_after = len(_load_checkpoint(config.checkpoint_path))
+                    new_rows = cp_after - cp_before
 
-                status.update(
-                    label=(
-                        f"Done — {result['classified']} classified | "
-                        f"{cp_before} already in checkpoint | "
-                        f"{new_rows} new"
-                    ),
-                    state="complete",
-                )
+                    status.update(
+                        label=(
+                            f"Done — {result['classified']} classified | "
+                            f"{cp_before} already in checkpoint | "
+                            f"{new_rows} new"
+                        ),
+                        state="complete",
+                    )
 
-        # Auto-refresh the dashboard to show updated data.
-        if result is not None:
-            st.cache_data.clear()
-            st.rerun()
+            # Auto-refresh the dashboard to show updated data.
+            if result is not None:
+                st.cache_data.clear()
+                st.rerun()
 
     st.divider()
 
