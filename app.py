@@ -445,24 +445,36 @@ def main():
         stats_df = pd.DataFrame()
         grand_total = 0
 
-    m1, m2 = st.columns(2)
     m1.metric("Total Startups", grand_total)
-    m2.metric("Countries", len(stats_df))
 
     if not stats_df.empty:
         col_chart, col_pie = st.columns(2)
         with col_chart:
+            bar_df = stats_df.copy()
             fig_bar = px.bar(
-                stats_df, x="Count", y="Country",
+                bar_df, x="Count", y="Country",
                 title="Country Distribution",
                 orientation="h",
             )
             fig_bar.update_yaxes(tickangle=0)
             st.plotly_chart(fig_bar, use_container_width=True)
         with col_pie:
+            pie_df = stats_df.copy()
             fig_pie = px.pie(
-                stats_df, values="Count", names="Country",
+                pie_df, values="Count", names="Country",
                 title="Country Percentage",
+            )
+            fig_pie.update_traces(
+                textposition="inside",
+                textinfo="percent+label",
+                texttemplate="%{label}<br>%{percent}" if False else None,
+            )
+            # Hide labels on 0-count slices to avoid clutter
+            fig_pie.update_traces(
+                text=stats_df.apply(
+                    lambda r: f"{r['Country']} {r['Percentage']}%" if r["Count"] > 0 else "",
+                    axis=1,
+                )
             )
             st.plotly_chart(fig_pie, use_container_width=True)
 
@@ -475,21 +487,13 @@ def main():
     # ── Startup Table ──────────────────────────────────────────────────
     st.header("Startup Table")
 
-    country_filter = st.selectbox("Filter by Country", ["All"] + COUNTRY_TABS)
     search = st.text_input("Search", placeholder="Type to filter rows...")
 
-    if country_filter == "All":
-        try:
-            header, rows = _read_all_country_tabs(sheet_id)
-        except Exception as exc:
-            st.error(f"Could not read country tabs: {exc}")
-            header, rows = [], []
-    else:
-        try:
-            header, rows = _read_tab(sheet_id, country_filter)
-        except Exception as exc:
-            st.error(f"Could not read tab '{country_filter}': {exc}")
-            header, rows = [], []
+    try:
+        header, rows = _read_all_country_tabs(sheet_id)
+    except Exception as exc:
+        st.error(f"Could not read country tabs: {exc}")
+        header, rows = [], []
 
     if header and rows:
         df = pd.DataFrame(rows, columns=header)
