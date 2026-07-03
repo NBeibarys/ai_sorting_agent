@@ -64,14 +64,15 @@ SELECTABLE_COUNTRIES = [
 # regardless of which countries were selected for the last run.
 COUNTRY_TABS = list(TARGET_TABS.keys()) + ["Human Review", "MENA", "Other Countries"]
 
-# Default column auto-detect needles: the first header (case-insensitive)
-# containing any of these substrings becomes the default selection.
+# Substring needles for auto-detecting column mappings from sheet headers.
+# These columns are NOT user-selectable — the sidebar only exposes Sheet,
+# Tab, Classify column, Dedup column, Output columns, and Countries.
 _COL_NEEDLES = {
-    "name": ["startup name", "startup", "company name", "name"],
-    "founder": ["full name of your ceo", "ceo name", "founder", "full name"],
-    "email": ["ceo's email", "ceo email", "email"],
-    "telegram": ["telegram account", "telegram", "whatsapp"],
-    "pitch_deck": ["pitch deck", "pitch", "deck"],
+    "name": ["startup", "name"],
+    "founder": ["ceo", "founder", "your name"],
+    "email": ["email"],
+    "telegram": ["telegram"],
+    "pitch_deck": ["pitch", "deck"],
 }
 
 
@@ -83,6 +84,23 @@ def _default_index(headers: list[str], needles: list[str]) -> int:
             if needle in low:
                 return i
     return 0
+
+
+def _auto_detect_column(
+    headers: list[str], needles: list[str], exclude: list[str] | None = None
+) -> str:
+    """Find the first header containing any needle (case-insensitive).
+
+    A header containing any exclude substring is skipped. Falls back to
+    headers[0] when nothing matches (or "" if headers is empty).
+    """
+    exclude = exclude or []
+    lowered = [h.lower() for h in headers]
+    for needle in needles:
+        for i, low in enumerate(lowered):
+            if needle in low and not any(ex in low for ex in exclude):
+                return headers[i]
+    return headers[0] if headers else ""
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────
@@ -299,33 +317,19 @@ def main():
     default_dedup_idx = _default_index(headers, _COL_NEEDLES["name"])
     dedup_col = st.sidebar.selectbox("Dedup Column", headers, index=default_dedup_idx)
 
-    # ── Column selectors (fix hardcoded Alchemist column names) ────────
-    # Each dropdown auto-fills from the sheet headers and defaults to the
-    # first header containing a recognizable needle, so the app works for
-    # R2B, Alchemist, or any future sheet without code changes.
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("Column Mapping")
-
-    name_col = st.sidebar.selectbox(
-        "Startup Name Column", headers,
-        index=_default_index(headers, _COL_NEEDLES["name"]),
+    # ── Auto-detected column mappings (not user-selectable) ────────────
+    # founder / email / telegram / pitch-deck / startup-name are all
+    # auto-detected from the sheet headers via substring matching, so the
+    # app works for Alchemist, R2B, or any future sheet without code
+    # changes. Only the startup-name column is also used as the default
+    # for the Dedup dropdown above.
+    name_col = _auto_detect_column(
+        headers, _COL_NEEDLES["name"], exclude=["ceo", "founder"]
     )
-    founder_col = st.sidebar.selectbox(
-        "Founder / CEO Name Column", headers,
-        index=_default_index(headers, _COL_NEEDLES["founder"]),
-    )
-    email_col = st.sidebar.selectbox(
-        "Email Column", headers,
-        index=_default_index(headers, _COL_NEEDLES["email"]),
-    )
-    telegram_col = st.sidebar.selectbox(
-        "Telegram Column", headers,
-        index=_default_index(headers, _COL_NEEDLES["telegram"]),
-    )
-    pitch_deck_col = st.sidebar.selectbox(
-        "Pitch Deck Column", headers,
-        index=_default_index(headers, _COL_NEEDLES["pitch_deck"]),
-    )
+    founder_col = _auto_detect_column(headers, _COL_NEEDLES["founder"])
+    email_col = _auto_detect_column(headers, _COL_NEEDLES["email"])
+    telegram_col = _auto_detect_column(headers, _COL_NEEDLES["telegram"])
+    pitch_deck_col = _auto_detect_column(headers, _COL_NEEDLES["pitch_deck"])
 
     output_cols = st.sidebar.multiselect(
         "Output Columns", headers, default=headers
@@ -449,10 +453,11 @@ def main():
         col_chart, col_pie = st.columns(2)
         with col_chart:
             fig_bar = px.bar(
-                stats_df, x="Country", y="Count",
+                stats_df, x="Count", y="Country",
                 title="Country Distribution",
+                orientation="h",
             )
-            fig_bar.update_xaxes(tickangle=45)
+            fig_bar.update_yaxes(tickangle=0)
             st.plotly_chart(fig_bar, use_container_width=True)
         with col_pie:
             fig_pie = px.pie(
