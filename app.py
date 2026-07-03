@@ -445,7 +445,7 @@ def main():
         stats_df = pd.DataFrame()
         grand_total = 0
 
-    m1.metric("Total Startups", grand_total)
+    st.metric("Total Startups", grand_total)
 
     if not stats_df.empty:
         col_chart, col_pie = st.columns(2)
