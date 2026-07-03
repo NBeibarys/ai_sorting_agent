@@ -5,15 +5,21 @@ Run from the repo root:
     streamlit run app.py
 
 Sidebar controls let the user pick a sheet, tab, classify column, dedup
-column, and output columns. The main area shows Total Statistics (summary
-table, bar chart, pie chart), a startup table with country filter + CSV
-download, and a "Classify New Rows" button that runs the existing pipeline
-with a per-sheet checkpoint file.
+column, output columns, and which country tabs to generate. The main area
+shows Trends, Total Statistics (summary table, bar chart, pie chart), and
+a startup table with country filter.
+
+Classification is driven by a per-sheet checkpoint file. The pipeline's
+country routing (src/pipeline.TARGET_TABS and _is_mena) is patched at
+runtime so only the user-selected countries get dedicated output tabs;
+unselected countries fall through to "Other Countries". No data leaves
+the app via download -- data stays in the sheet.
 """
 
 import io
 import os
 import sys
+from collections import OrderedDict
 
 import pandas as pd
 import plotly.express as px
@@ -27,6 +33,7 @@ if _REPO_DIR not in sys.path:
     sys.path.insert(0, _REPO_DIR)
 
 from src.config import Config
+from src import pipeline as pipeline_mod
 from src.google_clients import get_sheets_service, read_sheet_rows
 from src.pipeline import run_batch, _load_checkpoint, TARGET_TABS
 
@@ -36,8 +43,46 @@ SHEETS = {
     "R2B": "1nPKrGpVrRsYus7jSPOflRct5Git4-THXsLhsCuXtcVg",
 }
 
-# Country tabs for the startup-table filter dropdown.
+# The 9 countries a user can toggle on/off in the sidebar. "Human Review"
+# and "Other Countries" are always generated (catch-alls) and are NOT in
+# this list. MENA is selectable: when deselected, MENA-region rows fall
+# through to "Other Countries" instead of the dedicated MENA tab.
+SELECTABLE_COUNTRIES = [
+    "Uzbekistan",
+    "Turkiye",
+    "Georgia",
+    "Kyrgyzstan",
+    "Azerbaijan",
+    "USA",
+    "Kazakhstan",
+    "Mong. Turkmenistan Tajikistan",
+    "MENA",
+]
+
+# Country tabs for the startup-table filter dropdown: every tab that can
+# exist in the sheet after a run. Stays the full set so the filter works
+# regardless of which countries were selected for the last run.
 COUNTRY_TABS = list(TARGET_TABS.keys()) + ["Human Review", "MENA", "Other Countries"]
+
+# Default column auto-detect needles: the first header (case-insensitive)
+# containing any of these substrings becomes the default selection.
+_COL_NEEDLES = {
+    "name": ["startup name", "startup", "company name", "name"],
+    "founder": ["full name of your ceo", "ceo name", "founder", "full name"],
+    "email": ["ceo's email", "ceo email", "email"],
+    "telegram": ["telegram account", "telegram", "whatsapp"],
+    "pitch_deck": ["pitch deck", "pitch", "deck"],
+}
+
+
+def _default_index(headers: list[str], needles: list[str]) -> int:
+    """Index of the first header (lowercased) containing any needle, else 0."""
+    lowered = [h.lower() for h in headers]
+    for needle in needles:
+        for i, low in enumerate(lowered):
+            if needle in low:
+                return i
+    return 0
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────
@@ -150,11 +195,16 @@ def _read_all_country_tabs(sheet_id: str) -> tuple[list, list]:
     return header or [], all_rows
 
 
-def _build_config(sheet_id, tab, classify_col, dedup_col, sheet_name) -> Config:
+def _build_config(
+    sheet_id, tab, classify_col, dedup_col, sheet_name,
+    name_col, founder_col, email_col, telegram_col, pitch_deck_col,
+) -> Config:
     """Build a Config manually from user selections (not from_env).
 
     Per-sheet checkpoint: checkpoint_alchemist.json / checkpoint_r2b.json
-    so the two sheets never mix.
+    so the two sheets never mix. Column names come from the sidebar
+    dropdowns so the same app works for Alchemist, R2B, and any future
+    sheet without code changes.
     """
     return Config(
         sheet_id=sheet_id,
@@ -167,13 +217,44 @@ def _build_config(sheet_id, tab, classify_col, dedup_col, sheet_name) -> Config:
         max_concurrency=int(os.environ.get("MAX_CONCURRENCY", "8")),
         checkpoint_path=f"checkpoint_{sheet_name.lower()}.json",
         country_column=classify_col,
-        name_column="startup name",
-        founder_name_column="full name of your ceo",
-        email_column="ceo's email",
-        telegram_column="telegram account",
-        pitch_deck_column="pitch deck",
+        name_column=name_col,
+        founder_name_column=founder_col,
+        email_column=email_col,
+        telegram_column=telegram_col,
+        pitch_deck_column=pitch_deck_col,
         dedup_column=dedup_col,
     )
+
+
+def _run_classify_with_selections(config: Config, selected_countries: list[str]):
+    """Run run_batch with the pipeline's country routing patched so only
+    the user-selected countries get dedicated output tabs.
+
+    Patches pipeline_mod.TARGET_TABS (used by _route_rows, _print_summary,
+    write_total_statistics, run_batch) and pipeline_mod._is_mena (used by
+    _route_rows). Restored in a finally block so a Streamlit rerun of the
+    script does not see stale state.
+
+    - Selected target countries: kept in TARGET_TABS -> dedicated tab.
+    - Deselected target countries: fall through to Other Countries.
+    - MENA selected: original _is_mena behavior (rows go to MENA tab).
+    - MENA deselected: _is_mena forced False -> MENA rows go to Other.
+    """
+    selected_set = set(selected_countries)
+    filtered_tabs = OrderedDict(
+        (k, v) for k, v in pipeline_mod.TARGET_TABS.items()
+        if k in selected_set
+    )
+    mena_selected = "MENA" in selected_set
+    orig_tabs = pipeline_mod.TARGET_TABS
+    orig_is_mena = pipeline_mod._is_mena
+    pipeline_mod.TARGET_TABS = filtered_tabs
+    pipeline_mod._is_mena = orig_is_mena if mena_selected else (lambda _raw: False)
+    try:
+        return run_batch(config, dry_run=False, force=False)
+    finally:
+        pipeline_mod.TARGET_TABS = orig_tabs
+        pipeline_mod._is_mena = orig_is_mena
 
 
 # ── Main ────────────────────────────────────────────────────────────────
@@ -215,24 +296,97 @@ def main():
     classify_col = st.sidebar.selectbox("Classify Column", headers)
 
     # Dedup column — default to the startup-name column if present.
-    default_dedup_idx = 0
-    for i, h in enumerate(headers):
-        if "startup name" in h.lower():
-            default_dedup_idx = i
-            break
+    default_dedup_idx = _default_index(headers, _COL_NEEDLES["name"])
     dedup_col = st.sidebar.selectbox("Dedup Column", headers, index=default_dedup_idx)
+
+    # ── Column selectors (fix hardcoded Alchemist column names) ────────
+    # Each dropdown auto-fills from the sheet headers and defaults to the
+    # first header containing a recognizable needle, so the app works for
+    # R2B, Alchemist, or any future sheet without code changes.
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("Column Mapping")
+
+    name_col = st.sidebar.selectbox(
+        "Startup Name Column", headers,
+        index=_default_index(headers, _COL_NEEDLES["name"]),
+    )
+    founder_col = st.sidebar.selectbox(
+        "Founder / CEO Name Column", headers,
+        index=_default_index(headers, _COL_NEEDLES["founder"]),
+    )
+    email_col = st.sidebar.selectbox(
+        "Email Column", headers,
+        index=_default_index(headers, _COL_NEEDLES["email"]),
+    )
+    telegram_col = st.sidebar.selectbox(
+        "Telegram Column", headers,
+        index=_default_index(headers, _COL_NEEDLES["telegram"]),
+    )
+    pitch_deck_col = st.sidebar.selectbox(
+        "Pitch Deck Column", headers,
+        index=_default_index(headers, _COL_NEEDLES["pitch_deck"]),
+    )
 
     output_cols = st.sidebar.multiselect(
         "Output Columns", headers, default=headers
     )
 
+    # ── Country selector ───────────────────────────────────────────────
+    # Multi-select for which country tabs to generate. Default: all 9.
+    # "Human Review" and "Other Countries" are always generated (catch-alls)
+    # and are not user-selectable.
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("Country Tabs to Generate")
+    selected_countries = st.sidebar.multiselect(
+        "Countries",
+        SELECTABLE_COUNTRIES,
+        default=SELECTABLE_COUNTRIES,
+        help=(
+            "Only generate tabs for the selected countries. Rows that "
+            "don't match any selected country go to 'Other Countries'. "
+            "'Human Review' and 'Other Countries' are always generated."
+        ),
+    )
+    if not selected_countries:
+        st.sidebar.warning(
+            "No countries selected — every classified row will land in "
+            "'Other Countries'. Select at least one country."
+        )
+
     if st.sidebar.button("Refresh Data"):
         st.cache_data.clear()
         st.rerun()
 
+    # ── Trends ─────────────────────────────────────────────────────────
+    # X total applications in source tab, Y classified (in checkpoint),
+    # Z = X - Y new since last run. Live reads, cached 30s.
+    st.header("Trends")
+    try:
+        _src_header, src_rows = _read_tab(sheet_id, tab)
+        total_apps = len(src_rows)
+    except Exception as exc:
+        st.warning(f"Could not read source tab for trends: {exc}")
+        total_apps = 0
+
+    checkpoint_path = f"checkpoint_{sheet_name.lower()}.json"
+    classified_count = len(_load_checkpoint(checkpoint_path))
+    new_since_last = max(total_apps - classified_count, 0)
+
+    t1, t2, t3 = st.columns(3)
+    t1.metric("Total Applications", total_apps)
+    t2.metric("Classified", classified_count)
+    t3.metric("New Since Last Run", new_since_last)
+    st.caption(
+        f"Source tab: **{tab}** · Checkpoint: `{checkpoint_path}` "
+        f"({classified_count} rows classified so far)."
+    )
+
     # ── Classify New Rows button ───────────────────────────────────────
     if st.button("Classify New Rows", type="primary"):
-        config = _build_config(sheet_id, tab, classify_col, dedup_col, sheet_name)
+        config = _build_config(
+            sheet_id, tab, classify_col, dedup_col, sheet_name,
+            name_col, founder_col, email_col, telegram_col, pitch_deck_col,
+        )
         cp_before = len(_load_checkpoint(config.checkpoint_path))
 
         error_msg = None
@@ -243,7 +397,7 @@ def main():
 
         with st.status("Classifying new rows...", expanded=True) as status:
             try:
-                result = run_batch(config, dry_run=False, force=False)
+                result = _run_classify_with_selections(config, selected_countries)
             except Exception as exc:
                 error_msg = f"{type(exc).__name__}: {exc}"
             finally:
@@ -351,14 +505,8 @@ def main():
             df = df[mask]
 
         st.dataframe(df, use_container_width=True, hide_index=True)
-
-        csv = df.to_csv(index=False).encode("utf-8")
-        st.download_button(
-            "Download CSV",
-            csv,
-            file_name=f"{country_filter.lower().replace(' ', '_')}_startups.csv",
-            mime="text/csv",
-        )
+        # NOTE: CSV download intentionally removed — corporate security
+        # requirement: data must stay in the app, no exports.
     else:
         st.info("No data to display. Run classification first.")
 
