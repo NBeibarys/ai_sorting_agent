@@ -448,6 +448,7 @@ def main():
     st.metric("Total Startups", grand_total)
 
     if not stats_df.empty:
+        stats_df = stats_df.sort_values("Count", ascending=False).reset_index(drop=True)
         col_chart, col_pie = st.columns(2)
         with col_chart:
             bar_df = stats_df.copy()
@@ -457,6 +458,7 @@ def main():
                 orientation="h",
             )
             fig_bar.update_yaxes(tickangle=0)
+            fig_bar.update_yaxes(categoryorder="total ascending")
             st.plotly_chart(fig_bar, use_container_width=True)
         with col_pie:
             pie_df = stats_df.copy()
