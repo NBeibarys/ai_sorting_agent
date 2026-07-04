@@ -585,18 +585,6 @@ def main():
             if selected_country != "All Countries":
                 df = df[df[classify_col] == selected_country]
 
-        # SECONDARY filter: text search across visible columns.
-        search = st.text_input(
-            "Search", placeholder="Type to filter rows..."
-        )
-        if search:
-            mask = df.apply(
-                lambda r: search.lower()
-                in " ".join(str(v) for v in r).lower(),
-                axis=1,
-            )
-            df = df[mask]
-
         st.dataframe(df, use_container_width=True, hide_index=True)
         # NOTE: CSV download intentionally removed — corporate security
         # requirement: data must stay in the app, no exports.
