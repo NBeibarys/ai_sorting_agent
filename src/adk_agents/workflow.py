@@ -49,16 +49,17 @@ def _safe_bucket(bucket) -> str:
 class AdkSorterWorkflow:
     """Owns only immutable configuration; each invocation is isolated."""
 
-    def __init__(self, model: str):
+    def __init__(self, model: str, country_field_label: str = ""):
         os.environ["SSL_CERT_FILE"] = certifi.where()
         self.model = model
+        self.country_field_label = country_field_label
 
     async def _invoke_async(self, country_items: list[dict]) -> tuple[dict, dict]:
         """Run classifier -> verifier on a batch. Returns (cls_by_row_id, ver_by_row_id)."""
         session_service = InMemorySessionService()
         runner = Runner(
             app_name=APP_NAME,
-            agent=build_root_agent(self.model),
+            agent=build_root_agent(self.model, self.country_field_label),
             session_service=session_service,
         )
         session_id = uuid.uuid4().hex
@@ -137,7 +138,7 @@ class AdkSorterWorkflow:
     CHUNK_SIZE = 100  # 100 confirmed safe; 100+ hangs the LLM (~25s/chunk)
 
     def _classify_chunk(self, chunk: list[dict]) -> dict[int, tuple[str, bool]]:
-        """Classify a single chunk (≤50 rows) with retry loop. Returns row_id -> (bucket, needs_review).
+        """Classify a single chunk (<=CHUNK_SIZE rows) with retry loop. Returns row_id -> (bucket, needs_review).
 
         Retry loop (max 2 iterations, 2-4 LLM calls per chunk):
           Iteration 1: classify ALL chunk items + verify ALL items.
@@ -179,31 +180,81 @@ class AdkSorterWorkflow:
 
         return merged
 
-    def classify_batch(self, country_items: list[dict]) -> list[tuple[str, bool]]:
+    def classify_batch(
+        self,
+        country_items: list[dict],
+        *,
+        on_chunk_done=None,
+    ) -> list[tuple[str, bool]]:
         """Classify a batch of rows; return (bucket, needs_review) tuples in input order.
 
         Input:  [{"row_id": 0, "country_raw": "Astana"}, ...]
         Output: [("Kazakhstan", False), ...] -- one (bucket, needs_review) per input, in row_id order.
 
-        Chunks input at CHUNK_SIZE (50) to avoid LLM hangs on large batches.
-        Each chunk runs independently with its own retry loop. Results are
-        concatenated in row_id order. Interface unchanged from non-chunked version.
+        Chunks input at CHUNK_SIZE (100) to avoid LLM hangs on large batches.
+        Each chunk runs independently with its own retry loop. If the Gemini
+        API fails on one chunk, that chunk is retried with backoff (3 retries,
+        5s/10s/20s); if it still fails, only that chunk is marked 'Other' and
+        an error is logged, while the remaining chunks continue. After each
+        successful chunk, on_chunk_done(merged_for_this_chunk) is invoked so
+        the caller can checkpoint progress and avoid re-paying for re-run
+        chunks on a mid-batch crash. Results are concatenated in row_id order.
+        Interface unchanged from non-chunked version.
         """
         if not country_items:
             return []
 
         total = len(country_items)
         all_merged: dict[int, tuple[str, bool]] = {}
+        errored_rids: set[int] = set()
+
+        def _process_chunk(chunk: list[dict], chunk_num: int, num_chunks: int) -> None:
+            """Classify one chunk with 3-attempt backoff retry (5s/10s/20s)."""
+            backoff_seconds = (5, 10, 20)
+            last_exc: Exception | None = None
+            for attempt in range(len(backoff_seconds) + 1):
+                try:
+                    merged = self._classify_chunk(chunk)
+                    all_merged.update(merged)
+                    if on_chunk_done is not None:
+                        on_chunk_done(merged)
+                    return
+                except Exception as exc:  # noqa: BLE001 - retry any failure
+                    last_exc = exc
+                    if attempt < len(backoff_seconds):
+                        wait = backoff_seconds[attempt]
+                        print(
+                            f"  [chunk {chunk_num}/{num_chunks}] failed "
+                            f"(attempt {attempt + 1}/{len(backoff_seconds) + 1}): "
+                            f"{type(exc).__name__}: {exc} -- retrying in {wait}s",
+                            flush=True,
+                        )
+                        import time as _time
+                        _time.sleep(wait)
+            # All retries exhausted: mark only this chunk's rows as Other.
+            print(
+                f"  [chunk {chunk_num}/{num_chunks}] FAILED after {len(backoff_seconds) + 1} "
+                f"attempts: {type(last_exc).__name__}: {last_exc} -- "
+                f"marking {len(chunk)} rows as Other",
+                flush=True,
+            )
+            for item in chunk:
+                try:
+                    rid = int(item["row_id"])
+                    errored_rids.add(rid)
+                    all_merged[rid] = ("Other", False)
+                except (KeyError, TypeError, ValueError):
+                    pass
 
         if total <= self.CHUNK_SIZE:
-            all_merged = self._classify_chunk(country_items)
+            _process_chunk(country_items, 1, 1)
         else:
             num_chunks = (total + self.CHUNK_SIZE - 1) // self.CHUNK_SIZE
             for i in range(0, total, self.CHUNK_SIZE):
                 chunk = country_items[i:i + self.CHUNK_SIZE]
                 chunk_num = i // self.CHUNK_SIZE + 1
                 print(f"  [chunk {chunk_num}/{num_chunks}] classifying {len(chunk)} rows...", flush=True)
-                all_merged.update(self._classify_chunk(chunk))
+                _process_chunk(chunk, chunk_num, num_chunks)
 
         out = []
         for item in country_items:

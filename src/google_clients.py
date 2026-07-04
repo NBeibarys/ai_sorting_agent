@@ -88,7 +88,7 @@ def create_sheet_tab(sheets_service, sheet_id: str, title: str) -> None:
     ).execute()
 
 
-def write_tab_data(sheets_service, sheet_id: str, title: str, rows, color: bool = True, header: list | None = None) -> None:
+def write_tab_data(sheets_service, sheet_id: str, title: str, rows, header: list | None = None) -> None:
     """Write rows to a tab.
 
     Each row in `rows` is a list whose length matches `header`. The full
@@ -136,55 +136,6 @@ def write_tab_data(sheets_service, sheet_id: str, title: str, rows, color: bool 
         valueInputOption="RAW",
         body={"values": values},
     ).execute()
-    # Color the startup-name column (A) emerald green for all data rows.
-    # values().update() only writes cell data — the Sheets API applies
-    # cell formatting via a separate batchUpdate repeatCell request.
-    # Tabs are addressed by their integer sheetId (not title), so resolve
-    # this tab's sheetId by matching its title against the spreadsheet's
-    # sheet properties (same lookup create_sheet_tab performs).
-    # Only color the name column when `color` is set. The Human Review tab
-    # is written with color=False so its rows stay unstyled (not finalized).
-    num_data_rows = len(values) - 1
-    if color and num_data_rows > 0:
-        meta = (
-            sheets_service.spreadsheets()
-            .get(spreadsheetId=sheet_id, fields="sheets/properties")
-            .execute()
-        )
-        tab_sheet_id = None
-        for sheet in meta.get("sheets", []):
-            if sheet.get("properties", {}).get("title") == title:
-                tab_sheet_id = sheet.get("properties", {}).get("sheetId")
-                break
-        if tab_sheet_id is not None:
-            sheets_service.spreadsheets().batchUpdate(
-                spreadsheetId=sheet_id,
-                body={
-                    "requests": [
-                        {
-                            "repeatCell": {
-                                "range": {
-                                    "sheetId": tab_sheet_id,
-                                    "startRowIndex": 1,
-                                    "endRowIndex": num_data_rows + 1,
-                                    "startColumnIndex": 0,
-                                    "endColumnIndex": 1,
-                                },
-                                "cell": {
-                                    "userEnteredFormat": {
-                                        "backgroundColor": {
-                                            "red": 0.0,
-                                            "green": 0.804,
-                                            "blue": 0.4,
-                                        }
-                                    }
-                                },
-                                "fields": "userEnteredFormat.backgroundColor",
-                            }
-                        }
-                    ]
-                },
-            ).execute()
 
 
 def get_sheet_id_by_title(sheets_service, spreadsheet_id, title):

@@ -29,6 +29,9 @@ class Config:
     email_column: str
     telegram_column: str
     pitch_deck_column: str
+    incorporated_column: str
+    revenue_column: str
+    video_column: str
     dedup_column: str
 
     @classmethod
@@ -68,11 +71,27 @@ class Config:
             model=os.environ.get("SORTER_MODEL", "gemini-3.5-flash"),
             max_concurrency=int(os.environ.get("MAX_CONCURRENCY", "8")),
             checkpoint_path=os.environ.get("CHECKPOINT_PATH", "checkpoint.json"),
-            country_column="which country do most of your team members come from",
-            name_column="startup name",
-            founder_name_column="full name of your ceo",
-            email_column="ceo's email",
-            telegram_column="telegram account",
-            pitch_deck_column="pitch deck",
-            dedup_column="Startup name",
+            country_column=os.environ.get(
+                "SORTER_COUNTRY_COLUMN",
+                "which country do most of your team members come from",
+            ),
+            name_column=os.environ.get("SORTER_NAME_COLUMN", "startup name"),
+            founder_name_column=os.environ.get(
+                "SORTER_FOUNDER_NAME_COLUMN", "full name of your ceo"
+            ),
+            email_column=os.environ.get("SORTER_EMAIL_COLUMN", "ceo's email"),
+            telegram_column=os.environ.get("SORTER_TELEGRAM_COLUMN", "telegram account"),
+            pitch_deck_column=os.environ.get(
+                "SORTER_PITCH_DECK_COLUMN", "pitch deck"
+            ),
+            incorporated_column=os.environ.get(
+                "SORTER_INCORPORATED_COLUMN", "where is your startup incorporated"
+            ),
+            revenue_column=os.environ.get(
+                "SORTER_REVENUE_COLUMN", "what was your revenue"
+            ),
+            video_column=os.environ.get(
+                "SORTER_VIDEO_COLUMN", "video pitching"
+            ),
+            dedup_column=os.environ.get("DEDUP_COLUMN", "Startup name"),
         )

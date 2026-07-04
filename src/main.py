@@ -15,7 +15,7 @@ def main():
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Classify with a local heuristic instead of the LLM; no API calls (local heuristic + CSV input, no sheet writes).",
+        help="Classify with a local heuristic instead of the LLM; no API calls (reads the sheet, no sheet writes).",
     )
     parser.add_argument(
         "--force",

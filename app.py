@@ -240,6 +240,13 @@ def _build_config(
         email_column=email_col,
         telegram_column=telegram_col,
         pitch_deck_column=pitch_deck_col,
+        incorporated_column=os.environ.get(
+            "SORTER_INCORPORATED_COLUMN", "where is your startup incorporated"
+        ),
+        revenue_column=os.environ.get(
+            "SORTER_REVENUE_COLUMN", "what was your revenue"
+        ),
+        video_column=os.environ.get("SORTER_VIDEO_COLUMN", "video pitching"),
         dedup_column=dedup_col,
     )
 
@@ -249,9 +256,8 @@ def _run_classify_with_selections(config: Config, selected_countries: list[str])
     the user-selected countries get dedicated output tabs.
 
     Patches pipeline_mod.TARGET_TABS (used by _route_rows, _print_summary,
-    write_total_statistics, run_batch) and pipeline_mod._is_mena (used by
-    _route_rows). Restored in a finally block so a Streamlit rerun of the
-    script does not see stale state.
+    run_batch) and pipeline_mod._is_mena (used by _route_rows). Restored in a
+    finally block so a Streamlit rerun of the script does not see stale state.
 
     - Selected target countries: kept in TARGET_TABS -> dedicated tab.
     - Deselected target countries: fall through to Other Countries.

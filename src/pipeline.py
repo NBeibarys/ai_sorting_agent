@@ -10,7 +10,6 @@ Batch mode sends ALL uncheckpointed rows to classify_batch() in ONE call
 the verifier-rejected subset) instead of one ADK call per row. For 687 rows
 that is 2-4 calls, down from ~1374.
 """
-import csv
 import json
 import os
 import re
@@ -277,21 +276,6 @@ def _print_summary(grouped: dict, other_log: list, review_rows: list, total: int
             print(f"    {n:4d}  {b}")
 
 
-_DRY_RUN_CSV = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "Copy of Road to Battlefield 2026 (Responses) - Form Responses 1 (1).csv",
-)
-
-
-def _read_csv_rows(path: str):
-    """Read the local form-responses CSV as (header, rows). Dry-run only."""
-    with open(path, newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        header = list(reader.fieldnames or [])
-        rows = [[row.get(col, "") for col in header] for row in reader]
-    return header, rows
-
-
 def _deduplicate_rows(row_meta: list, rows: list, dedup_col_idx, *, column_name: str) -> list:
     """Drop duplicate rows by DEDUP_COLUMN value.
 
@@ -338,56 +322,16 @@ def _deduplicate_rows(row_meta: list, rows: list, dedup_col_idx, *, column_name:
     return unique
 
 
-def write_total_statistics(sheets_service, sheet_id: str) -> None:
-    """Write a 'Total Statistics' tab with per-country startup counts.
-
-    Reads every output tab the pipeline just wrote (one per target
-    country, plus Human Review, MENA, and Other Countries), counts the
-    data rows in each (excluding the header row), and writes a new
-    'Total Statistics' tab with columns Country | Count sorted by count
-    descending, with a 'Total' row at the bottom holding the sum.
-
-    Reading the tabs back from the sheet (rather than reusing the
-    in-memory buckets) verifies the writes actually landed and reflects
-    the true on-disk state.
-    """
-    stats_tabs = list(TARGET_TABS.keys()) + ["Human Review", "MENA", "Other Countries"]
-    counts = []
-    for title in stats_tabs:
-        try:
-            _header, rows = read_sheet_rows(sheets_service, sheet_id, title)
-        except Exception as exc:
-            print(f"WARNING: could not read tab '{title}' for stats: {exc}", flush=True)
-            rows = []
-        counts.append((title, len(rows)))
-    # Sort by count descending; ties keep insertion order (stable sort).
-    counts.sort(key=lambda x: x[1], reverse=True)
-    total = sum(n for _, n in counts)
-    stats_rows = [[country, n] for country, n in counts]
-    stats_rows.append(["Total", total])
-    create_sheet_tab(sheets_service, sheet_id, "Total Statistics")
-    write_tab_data(
-        sheets_service, sheet_id, "Total Statistics",
-        stats_rows, color=False, header=["Country", "Count"],
-    )
-    print(
-        f"\nWrote 'Total Statistics' tab ({len(counts)} countries, "
-        f"{total} total startups).",
-        flush=True,
-    )
-
-
 def run_batch(config: Config, *, dry_run: bool = False, force: bool = False, limit: int = 0):
-    if dry_run:
-        header, rows = _read_csv_rows(_DRY_RUN_CSV)
-        sheets_service = None
-        source = f"local CSV (dry-run): {_DRY_RUN_CSV}"
-    else:
-        sheets_service = get_sheets_service(config.service_account_path)
-        header, rows = read_sheet_rows(
-            sheets_service, config.sheet_id, config.sheet_range
-        )
-        source = f"sheet {config.sheet_id} (tab {config.sheet_range!r})"
+    # Dry-run reads from the same Google Sheet as a normal run (the legacy
+    # local-CSV path pointed at a file that no longer exists). Dry-run still
+    # skips sheet writes and uses the local heuristic classifier instead of
+    # the LLM, so it costs no API spend.
+    sheets_service = get_sheets_service(config.service_account_path)
+    header, rows = read_sheet_rows(
+        sheets_service, config.sheet_id, config.sheet_range
+    )
+    source = f"sheet {config.sheet_id} (tab {config.sheet_range!r})"
     if limit > 0:
         rows = rows[:limit]
     cols = _find_columns(header, config)
@@ -401,16 +345,14 @@ def run_batch(config: Config, *, dry_run: bool = False, force: bool = False, lim
     )
 
     header_row = 1
-    form_responses_sheet_id = None
-    if not dry_run:
-        form_responses_sheet_id = get_sheet_id_by_title(
-            sheets_service, config.sheet_id, config.sheet_range
-        )
+    form_responses_sheet_id = get_sheet_id_by_title(
+        sheets_service, config.sheet_id, config.sheet_range
+    )
 
     workflow = None
     if not dry_run:
         from .adk_agents import AdkSorterWorkflow
-        workflow = AdkSorterWorkflow(config.model)
+        workflow = AdkSorterWorkflow(config.model, config.country_column)
 
     checkpoint = {} if dry_run else _load_checkpoint(config.checkpoint_path)
 
@@ -493,13 +435,28 @@ def run_batch(config: Config, *, dry_run: bool = False, force: bool = False, lim
         print(f"Classified {len(to_classify)} rows (dry-run heuristic).", flush=True)
     else:
         # Single batch: ALL unclassified rows in one classify_batch() call
-        # (2-4 LLM calls total: classifier+verifier, plus an optional retry
-        # round on the verifier-rejected subset). No chunking and no
-        # ThreadPoolExecutor -- 2-4 calls need no parallelism.
+        # (2-4 LLM calls per chunk of CHUNK_SIZE rows). Chunks run with
+        # per-chunk retry (3 attempts, 5s/10s/20s backoff); a chunk that
+        # fails all retries is marked 'Other' while the rest continue.
+        # After each successful chunk the checkpoint is saved so a mid-batch
+        # crash does not re-pay for already-classified chunks.
         batch_items = [item for (_i, item) in to_classify]
-        print(f"Batch mode: {len(to_classify)} rows in a single batch (2-4 LLM calls total).", flush=True)
+        print(f"Batch mode: {len(to_classify)} rows in a single batch (2-4 LLM calls per chunk).", flush=True)
+        # Map row_id -> source index i so the checkpoint callback can update
+        # buckets[i] and checkpoint[row_i] per successfully classified chunk.
+        rid_to_i = {item["row_id"]: i for (i, item) in to_classify}
+
+        def _on_chunk_done(merged: dict) -> None:
+            for rid, entry in merged.items():
+                idx = rid_to_i.get(rid)
+                if idx is None:
+                    continue
+                buckets[idx] = entry
+                checkpoint[f"row_{idx}"] = {"bucket": entry[0], "needs_review": entry[1]}
+            _save_checkpoint(config.checkpoint_path, checkpoint)
+
         try:
-            batch_buckets = workflow.classify_batch(batch_items)
+            batch_buckets = workflow.classify_batch(batch_items, on_chunk_done=_on_chunk_done)
         except Exception as exc:
             for (i, _item) in to_classify:
                 errors[f"row_{i}"] = f"batch: {type(exc).__name__}: {exc}"
@@ -539,28 +496,28 @@ def run_batch(config: Config, *, dry_run: bool = False, force: bool = False, lim
         mena_tab = "MENA"
         other_tab = "Other Countries"
         tab_writes = [
-            (title, grouped.get(bucket, []), False)
+            (title, grouped.get(bucket, []))
             for bucket, title in TARGET_TABS.items()
         ]
-        tab_writes.append((review_tab, review_rows, False))
+        tab_writes.append((review_tab, review_rows))
         # MENA countries (Qatar, UAE, Oman, Egypt, Algeria, Jordan, Pakistan)
         # get their own visible tab. mena_log rows carry the full source row
         # (all 16 columns) -- same format as every other tab.
-        tab_writes.append((mena_tab, mena_log, False))
+        tab_writes.append((mena_tab, mena_log))
         # Non-target, non-MENA countries (Canada, China, Japan, etc.) get
         # their own visible tab. other_log rows carry the full source row plus
         # a trailing bucket cell; strip the bucket for write_tab_data, which
         # expects the same full-row format as every other tab.
-        tab_writes.append((other_tab, [r[:-1] for r in other_log], False))
-        for title, rows, color in tab_writes:
+        tab_writes.append((other_tab, [r[:-1] for r in other_log]))
+        for title, rows in tab_writes:
             create_sheet_tab(sheets_service, config.sheet_id, title)
-            write_tab_data(sheets_service, config.sheet_id, title, rows, color=color, header=OUTPUT_HEADER)
+            write_tab_data(sheets_service, config.sheet_id, title, rows, header=OUTPUT_HEADER)
         print(f"\nWrote {len(tab_writes)} tabs into sheet {config.sheet_id}", flush=True)
         # Total Statistics: compute from in-memory tab_writes (not by reading
         # the sheet back, which can return stale data due to API eventual
         # consistency immediately after writes).
         try:
-            stats_counts = [(title, len(rows)) for title, rows, _ in tab_writes]
+            stats_counts = [(title, len(rows)) for title, rows in tab_writes]
             stats_counts.sort(key=lambda x: x[1], reverse=True)
             total_count = sum(n for _, n in stats_counts)
             stats_rows = [[country, n] for country, n in stats_counts]
@@ -568,7 +525,7 @@ def run_batch(config: Config, *, dry_run: bool = False, force: bool = False, lim
             create_sheet_tab(sheets_service, config.sheet_id, "Total Statistics")
             write_tab_data(
                 sheets_service, config.sheet_id, "Total Statistics",
-                stats_rows, color=False, header=["Country", "Count"],
+                stats_rows, header=["Country", "Count"],
             )
             print(
                 f"\nWrote 'Total Statistics' tab ({len(stats_counts)} countries, "
@@ -576,7 +533,7 @@ def run_batch(config: Config, *, dry_run: bool = False, force: bool = False, lim
                 flush=True,
             )
         except Exception as exc:
-            print(f"WARNING: write_total_statistics failed: {type(exc).__name__}: {exc}", flush=True)
+            print(f"WARNING: Total Statistics write failed: {type(exc).__name__}: {exc}", flush=True)
     return {
         "classified": total - len(errors),
         "errors": errors,

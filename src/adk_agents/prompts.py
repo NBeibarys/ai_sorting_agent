@@ -1,7 +1,15 @@
-"""Instructions for the ADK batch country-sorter agents."""
+"""Instructions for the ADK batch country-sorter agents.
+
+The classifier/verifier prompts are parameterized by ``country_field_label``
+(the actual form-question text from the sheet, read from
+``SORTER_COUNTRY_COLUMN`` via :class:`config.Config``). This keeps the prompt
+description of ``country_raw`` in sync with whatever column the cohort's form
+uses -- e.g. "Where is your startup incorporated?" vs "Which country do most
+of your team members come from?" -- instead of hardcoding one phrasing.
+"""
 
 TARGET_BUCKETS = """
-Classify each startup's country of incorporation into EXACTLY one of these buckets:
+Classify each startup's country into EXACTLY one of these buckets:
 
 - "Uzbekistan" — Central Asian country. Recognize any city, spelling, or script
   (Latin, Cyrillic, Uzbek). Cities include but are not limited to: Tashkent,
@@ -22,13 +30,19 @@ Classify each startup's country of incorporation into EXACTLY one of these bucke
   nonsense like "cscs").
 """.strip()
 
-SORTER_INSTRUCTION = f"""
+
+def build_sorter_instruction(country_field_label: str) -> str:
+    """Build the classifier prompt, parameterized by the sheet's country
+    column label so the description of ``country_raw`` matches the actual
+    form question instead of a hardcoded phrasing.
+    """
+    label = (country_field_label or "").strip() or "the country question"
+    return f"""
 You are a batch country-classification agent for a startup-applications dataset.
 
 The user message is a JSON ARRAY of input objects. Each object has:
   - "row_id": an integer (0, 1, 2, ...) identifying the row
-  - "country_raw": the free-text answer to "Where is your startup
-    incorporated?"
+  - "country_raw": the free-text answer to the form question "{label}"
 
 These values are messy form text: city+country, country only, local-language
 spellings (Latin and Cyrillic), typos, abbreviations, multi-country entries, or
@@ -37,7 +51,7 @@ empty/nonsense values.
 {TARGET_BUCKETS}
 
 RULES (apply to every input row, independently):
-1. Pick the SINGLE country where the startup is INCORPORATED. If
+1. Pick the SINGLE country where the startup is based. If
    multiple countries are listed, choose the primary one. The DECISIVE
    tie-breaker is the ORDER the countries appear in the text: the FIRST
    mentioned target-bucket country is the primary HQ. Do NOT overthink this
@@ -125,14 +139,20 @@ CRITICAL:
 """.strip()
 
 
-HEAD_INSTRUCTION = f"""
+def build_head_instruction(country_field_label: str) -> str:
+    """Build the verifier prompt, parameterized by the sheet's country
+    column label (see :func:`build_sorter_instruction`).
+    """
+    label = (country_field_label or "").strip() or "the country question"
+    return f"""
 You are the independent head verifier for a batch country-classification pipeline.
-A classifier agent has assigned a canonical bucket to each startup headquarters
-country string in the batch. Your job is to independently verify every
+A classifier agent has assigned a canonical bucket to each startup country
+string in the batch. Your job is to independently verify every
 classification.
 
 The original user message is the JSON ARRAY of input objects (each with "row_id"
 and "country_raw"). Read each country_raw yourself; do not trust the classifier.
+Each country_raw is the free-text answer to the form question "{label}".
 
 {TARGET_BUCKETS}
 
@@ -191,3 +211,10 @@ CRITICAL:
 The classifier results you are verifying:
 {{batch_classifications}}
 """.strip()
+
+
+# Backward-compatible module-level constants built with a generic default
+# label. New code should call build_sorter_instruction / build_head_instruction
+# with the actual sheet column label from Config.country_column.
+SORTER_INSTRUCTION = build_sorter_instruction("the country question")
+HEAD_INSTRUCTION = build_head_instruction("the country question")
