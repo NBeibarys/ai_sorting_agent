@@ -553,18 +553,19 @@ def main():
     if header and rows:
         df = pd.DataFrame(rows, columns=header)
 
-        # Honor output-column selection: keep only selected columns that
-        # exist in this tab's headers. If none match, show all columns.
-        available = [c for c in output_cols if c in df.columns]
-        if available:
-            df = df[available]
-
-        # Reorder: put name/startup column first
+        # Startup table shows ONLY the name column and the classify column.
+        # Auto-detect the startup/name column by header substring match.
         name_candidates = [c for c in df.columns if "startup" in c.lower() or "name" in c.lower()]
-        if name_candidates:
-            first_col = name_candidates[0]
-            cols = [first_col] + [c for c in df.columns if c != first_col]
-            df = df[cols]
+        name_col = name_candidates[0] if name_candidates else None
+
+        keep: list[str] = []
+        if name_col:
+            keep.append(name_col)
+        if classify_col in df.columns and classify_col != name_col:
+            keep.append(classify_col)
+
+        # Fallback: if neither column matched, show everything.
+        df = df[keep] if keep else df
 
         # Text search across all visible columns.
         if search:

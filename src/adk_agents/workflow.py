@@ -134,7 +134,7 @@ class AdkSorterWorkflow:
             merged[rid] = (_safe_bucket(bucket), needs_review)
         return merged
 
-    CHUNK_SIZE = 50  # 100+ hangs the LLM; 50 confirmed working (~25s)
+    CHUNK_SIZE = 100  # 100 confirmed safe; 100+ hangs the LLM (~25s/chunk)
 
     def _classify_chunk(self, chunk: list[dict]) -> dict[int, tuple[str, bool]]:
         """Classify a single chunk (≤50 rows) with retry loop. Returns row_id -> (bucket, needs_review).
