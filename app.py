@@ -559,6 +559,13 @@ def main():
         if available:
             df = df[available]
 
+        # Reorder: put name/startup column first
+        name_candidates = [c for c in df.columns if "startup" in c.lower() or "name" in c.lower()]
+        if name_candidates:
+            first_col = name_candidates[0]
+            cols = [first_col] + [c for c in df.columns if c != first_col]
+            df = df[cols]
+
         # Text search across all visible columns.
         if search:
             mask = df.apply(

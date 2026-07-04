@@ -556,11 +556,25 @@ def run_batch(config: Config, *, dry_run: bool = False, force: bool = False, lim
             create_sheet_tab(sheets_service, config.sheet_id, title)
             write_tab_data(sheets_service, config.sheet_id, title, rows, color=color, header=OUTPUT_HEADER)
         print(f"\nWrote {len(tab_writes)} tabs into sheet {config.sheet_id}", flush=True)
-        # Total Statistics: country -> startup count, sorted desc, with a
-        # Total row. Reads every output tab back from the sheet after all
-        # writes + coloring are done so the counts reflect the final state.
+        # Total Statistics: compute from in-memory tab_writes (not by reading
+        # the sheet back, which can return stale data due to API eventual
+        # consistency immediately after writes).
         try:
-            write_total_statistics(sheets_service, config.sheet_id)
+            stats_counts = [(title, len(rows)) for title, rows, _ in tab_writes]
+            stats_counts.sort(key=lambda x: x[1], reverse=True)
+            total_count = sum(n for _, n in stats_counts)
+            stats_rows = [[country, n] for country, n in stats_counts]
+            stats_rows.append(["Total", total_count])
+            create_sheet_tab(sheets_service, config.sheet_id, "Total Statistics")
+            write_tab_data(
+                sheets_service, config.sheet_id, "Total Statistics",
+                stats_rows, color=False, header=["Country", "Count"],
+            )
+            print(
+                f"\nWrote 'Total Statistics' tab ({len(stats_counts)} countries, "
+                f"{total_count} total startups).",
+                flush=True,
+            )
         except Exception as exc:
             print(f"WARNING: write_total_statistics failed: {type(exc).__name__}: {exc}", flush=True)
     return {
