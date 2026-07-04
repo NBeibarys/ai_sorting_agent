@@ -167,7 +167,14 @@ class AdkSorterWorkflow:
         merged: dict[int, tuple[str, bool]] = {}
         active_items = chunk  # iteration 1 = every input row
         for iteration in range(MAX_ITERATIONS):
-            classifications, verdicts = asyncio.run(self._invoke_async(active_items))
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_closed():
+                    raise RuntimeError("loop closed")
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            classifications, verdicts = loop.run_until_complete(self._invoke_async(active_items))
             merged.update(self._merge(classifications, verdicts, active_items))
 
             rejected_ids = [
