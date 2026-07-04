@@ -542,8 +542,6 @@ def main():
     # ── Startup Table ──────────────────────────────────────────────────
     st.header("Startup Table")
 
-    search = st.text_input("Search", placeholder="Type to filter rows...")
-
     try:
         header, rows = _read_all_country_tabs(sheet_id)
     except Exception as exc:
@@ -573,7 +571,24 @@ def main():
         # Fallback: if neither column matched, show everything.
         df = df[keep] if keep else df
 
-        # Text search across all visible columns.
+        # PRIMARY filter: country dropdown built from the classify column's
+        # unique values. "All Countries" (None) shows everything.
+        if classify_col in df.columns:
+            country_values = sorted(
+                v for v in df[classify_col].dropna().unique().tolist()
+                if str(v).strip() != ""
+            )
+            country_options = ["All Countries"] + country_values
+            selected_country = st.selectbox(
+                "Filter by Country", country_options
+            )
+            if selected_country != "All Countries":
+                df = df[df[classify_col] == selected_country]
+
+        # SECONDARY filter: text search across visible columns.
+        search = st.text_input(
+            "Search", placeholder="Type to filter rows..."
+        )
         if search:
             mask = df.apply(
                 lambda r: search.lower()
