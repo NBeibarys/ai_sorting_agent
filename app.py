@@ -542,19 +542,46 @@ def main():
     # ── Startup Table ──────────────────────────────────────────────────
     st.header("Startup Table")
 
+    # Dropdown of available country tabs (not column values)
+    available_tabs = []
+    svc = None
     try:
-        header, rows = _read_all_country_tabs(sheet_id)
+        svc = _get_sheets_service()
     except Exception as exc:
-        st.error(f"Could not read country tabs: {exc}")
+        st.error(f"Could not connect to Google Sheets: {exc}")
+
+    if svc:
+        # Check which country tabs actually have data
+        for tab_name in COUNTRY_TABS:
+            try:
+                h, r = read_sheet_rows(svc, sheet_id, tab_name)
+                if r:
+                    available_tabs.append(tab_name)
+            except Exception:
+                pass
+
+    if available_tabs:
+        selected_tab = st.selectbox(
+            "Filter by Country", ["All Countries"] + available_tabs
+        )
+
+        # Read data: single tab if selected, all tabs if "All Countries"
         header, rows = [], []
+        if selected_tab == "All Countries":
+            try:
+                header, rows = _read_all_country_tabs(sheet_id)
+            except Exception as exc:
+                st.error(f"Could not read country tabs: {exc}")
+        else:
+            try:
+                header, rows = read_sheet_rows(svc, sheet_id, selected_tab)
+            except Exception as exc:
+                st.error(f"Could not read {selected_tab} tab: {exc}")
 
     if header and rows:
         df = pd.DataFrame(rows, columns=header)
 
-        # Startup table shows ONLY the name column and the classify column.
-        # Auto-detect the startup/name column by header substring match, but
-        # exclude CEO/founder columns (which also contain "name") so the table
-        # highlights the startup name, not the founder/CEO name.
+        # Show ONLY 2 columns: startup name + classify column
         name_candidates = [
             c for c in df.columns
             if ("startup" in c.lower() or "name" in c.lower())
@@ -568,28 +595,15 @@ def main():
         if classify_col in df.columns and classify_col != name_col:
             keep.append(classify_col)
 
-        # Fallback: if neither column matched, show everything.
         df = df[keep] if keep else df
-
-        # PRIMARY filter: country dropdown built from the classify column's
-        # unique values. "All Countries" (None) shows everything.
-        if classify_col in df.columns:
-            country_values = sorted(
-                v for v in df[classify_col].dropna().unique().tolist()
-                if str(v).strip() != ""
-            )
-            country_options = ["All Countries"] + country_values
-            selected_country = st.selectbox(
-                "Filter by Country", country_options
-            )
-            if selected_country != "All Countries":
-                df = df[df[classify_col] == selected_country]
 
         st.dataframe(df, use_container_width=True, hide_index=True)
         # NOTE: CSV download intentionally removed — corporate security
         # requirement: data must stay in the app, no exports.
-    else:
+    elif not available_tabs:
         st.info("No data to display. Run classification first.")
+    else:
+        st.info(f"No data in selected tab. Try another country or run classification.")
 
 
 if __name__ == "__main__":
