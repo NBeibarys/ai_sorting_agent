@@ -20,8 +20,10 @@ from .config import Config
 from .google_clients import (
     color_cells_batch,
     create_sheet_tab,
+    delete_sheet_tab,
     get_sheet_id_by_title,
     get_sheets_service,
+    list_existing_tab_titles,
     read_sheet_rows,
     write_tab_data,
 )
@@ -36,6 +38,14 @@ TARGET_TABS = OrderedDict([
     ("Kazakhstan", "Kazakhstan"),
     ("Mong. Turkmenistan Tajikistan", "Mong. Turkmenistan Tajikistan"),
 ])
+
+# Tabs that must NEVER be deleted by tab cleanup, even if they are not in
+# the current run's tab list. These hold source data or cross-run state.
+PROTECTED_TABS = {
+    "Form Responses 1",
+    "Total Statistics",
+    "CRM",
+}
 
 COL_NEEDLES = {}  # name/country/founder/etc are added dynamically in _find_columns
 # Display-only reference columns: a missing needle yields "" instead of
@@ -351,50 +361,174 @@ def _print_summary(grouped: dict, other_log: list, review_rows: list, total: int
             print(f"    {n:4d}  {b}")
 
 
-def _deduplicate_rows(row_meta: list, rows: list, dedup_col_idx, *, column_name: str) -> list:
-    """Drop duplicate rows by DEDUP_COLUMN value.
+def _normalize_for_fuzzy(text: str) -> str:
+    """Aggressive normalization for fuzzy name comparison.
 
-    Matching is case-insensitive with whitespace stripped. Empty/null values
-    are NOT duplicates (every empty-dedup row is kept). Only the first
-    occurrence of each non-empty value is kept; later duplicates are dropped
-    entirely and excluded from classification and output.
+    Lowercase, strip accents, remove ALL punctuation AND whitespace so
+    'Agro ai', 'AgroAi', 'Agro.ai', and 'Agro  ai' all reduce to 'agroai'.
+    Deliberately simple (no edit distance) to avoid false-positive
+    over-merging like 'YerAI' vs 'CERTI'.
+    """
+    if not text:
+        return ""
+    # Accent-folded lowercase.
+    folded = "".join(
+        c for c in unicodedata.normalize("NFKD", text)
+        if not unicodedata.combining(c)
+    ).lower()
+    # Drop punctuation AND whitespace entirely so spacing/punctuation
+    # variations collapse to the same key.
+    return re.sub(r"[^\w]", "", folded, flags=re.UNICODE)
+
+
+def _deduplicate_rows(
+    row_meta: list,
+    rows: list,
+    dedup_col_idx,
+    *,
+    column_name: str,
+    email_col_idx=None,
+    name_col_idx=None,
+) -> list:
+    """Drop duplicate rows by DEDUP_COLUMN value, then by email, then fuzzy name.
+
+    Three passes (in order), each only dropping a row if it matches an
+    already-kept row from an EARLIER pass:
+
+    1. EXACT match on the raw dedup cell (case-insensitive, whitespace
+       stripped) -- same as the original behavior.
+    2. EMAIL match: if two kept rows share the same non-empty email, the
+       later one is dropped.
+    3. FUZZY name match: normalize names (strip punctuation, collapse
+       whitespace, lowercase, accent-fold) and drop later rows whose
+       normalized name matches an earlier kept row.
+
+    Empty/null values are NEVER a duplicate (every empty row is kept).
+    Only the first occurrence of each value is kept; later duplicates are
+    dropped entirely and excluded from classification and output. Each
+    removed duplicate is logged with the reason ('exact', 'email', 'fuzzy').
 
     `row_meta[i]` carries the original source row index in tuple position 0;
     that index is preserved so source-cell coloring still maps to the right
-    row. `rows` is the raw source rows list so we can read the dedup cell
-    directly via `dedup_col_idx`.
+    row. `rows` is the raw source rows list so we can read cells directly
+    via their column index.
+
+    `email_col_idx` and `name_col_idx` are optional column indices used by
+    the email and fuzzy passes. When None (no such column), those passes are
+    skipped and only exact dedup runs.
     """
     if not column_name or dedup_col_idx is None:
         return row_meta
-    seen: set = set()
-    unique: list = []
-    removed = 0
+
+    def _cell_val(idx: int, row_idx: int) -> str:
+        if idx is None or row_idx >= len(rows):
+            return ""
+        if 0 <= idx < len(rows[row_idx]):
+            return (rows[row_idx][idx] or "").strip()
+        return ""
+
+    total = len(row_meta)
+    removed = {"exact": 0, "email": 0, "fuzzy": 0}
+    kept: list = []  # list of meta_entry
+    seen_exact: set = set()
+    seen_emails: set = set()
+    seen_fuzzy_names: set = set()
+
     for meta_entry in row_meta:
         i = meta_entry[0]
-        raw = ""
-        if 0 <= dedup_col_idx < len(rows[i]):
-            raw = (rows[i][dedup_col_idx] or "").strip()
-        key = raw.lower()
-        if not key:
-            # Empty / null -> never a duplicate; always keep.
-            unique.append(meta_entry)
+        raw = _cell_val(dedup_col_idx, i)
+        exact_key = raw.lower()
+        if not exact_key:
+            # Empty dedup value -> never an exact duplicate; keep this row
+            # but still let email/fuzzy passes compare it.
+            exact_key = None
+        # PASS 1: exact dedup
+        if exact_key is not None and exact_key in seen_exact:
+            removed["exact"] += 1
+            print(
+                f"  dedup-exact: row {i} dropped (duplicate of earlier row "
+                f"on '{column_name}': {raw!r})",
+                flush=True,
+            )
             continue
-        if key in seen:
-            removed += 1
-            continue
-        seen.add(key)
-        unique.append(meta_entry)
-    total = len(row_meta)
+        if exact_key is not None:
+            seen_exact.add(exact_key)
+        # PASS 2: email dedup
+        email = _cell_val(email_col_idx, i) if email_col_idx is not None else ""
+        if email:
+            email_key = email.lower()
+            if email_key in seen_emails:
+                removed["email"] += 1
+                print(
+                    f"  dedup-email: row {i} dropped (same email {email!r} "
+                    f"as an earlier row)",
+                    flush=True,
+                )
+                continue
+            seen_emails.add(email_key)
+        # PASS 3: fuzzy name dedup (name column is the dedup column)
+        name_col = name_col_idx if name_col_idx is not None else dedup_col_idx
+        name_val = _cell_val(name_col, i)
+        fuzzy_key = _normalize_for_fuzzy(name_val)
+        if fuzzy_key:
+            if fuzzy_key in seen_fuzzy_names:
+                removed["fuzzy"] += 1
+                print(
+                    f"  dedup-fuzzy: row {i} dropped (normalized name "
+                    f"{fuzzy_key!r} matches an earlier row)",
+                    flush=True,
+                )
+                continue
+            seen_fuzzy_names.add(fuzzy_key)
+        kept.append(meta_entry)
+
+    total_removed = sum(removed.values())
     print(
-        f"Found {removed} duplicates in column '{column_name}', removing...",
+        f"Found {total_removed} duplicates in column '{column_name}' "
+        f"(exact={removed['exact']}, email={removed['email']}, "
+        f"fuzzy={removed['fuzzy']}), removing...",
         flush=True,
     )
     print(
-        f"Deduplication: removed {removed} of {total} rows "
-        f"({len(unique)} unique remaining).",
+        f"Deduplication: removed {total_removed} of {total} rows "
+        f"({len(kept)} unique remaining).",
         flush=True,
     )
-    return unique
+    return kept
+
+
+def _cleanup_stale_tabs(sheets_service, sheet_id: str, new_tab_titles: list) -> list:
+    """Delete tabs that exist in the sheet but are NOT in this run's tab list.
+
+    Prevents stale country tabs from a prior run lingering with old data.
+    Tabs in PROTECTED_TABS ('Form Responses 1', 'Total Statistics', 'CRM')
+    are never deleted. Returns the list of deleted tab titles (for logging).
+
+    Idempotent and safe: each delete is a separate batchUpdate, a transient
+    failure on one tab does not block the others, and the function logs
+    every deletion so an operator can see what was removed.
+    """
+    existing = list_existing_tab_titles(sheets_service, sheet_id)
+    new_set = set(new_tab_titles)
+    to_delete = [
+        title for title in existing
+        if title not in new_set and title not in PROTECTED_TABS
+    ]
+    if not to_delete:
+        return []
+    deleted = []
+    for title in to_delete:
+        try:
+            delete_sheet_tab(sheets_service, sheet_id, title)
+            deleted.append(title)
+            print(f"  tab-cleanup: deleted stale tab {title!r}", flush=True)
+        except Exception as exc:
+            print(
+                f"WARNING: tab-cleanup: could not delete stale tab "
+                f"{title!r}: {type(exc).__name__}: {exc}",
+                flush=True,
+            )
+    return deleted
 
 
 def run_batch(config: Config, *, dry_run: bool = False, force: bool = False, limit: int = 0,
@@ -484,7 +618,10 @@ def run_batch(config: Config, *, dry_run: bool = False, force: bool = False, lim
     # in each tuple so source-cell coloring still maps correctly.
     dedup_col_idx = cols.get("dedup")
     row_meta = _deduplicate_rows(
-        row_meta, rows, dedup_col_idx, column_name=config.dedup_column
+        row_meta, rows, dedup_col_idx,
+        column_name=config.dedup_column,
+        email_col_idx=cols.get("email"),
+        name_col_idx=cols.get("name"),
     )
     total = len(row_meta)  # post-dedup count, used for reporting/summary
 
@@ -613,6 +750,16 @@ def run_batch(config: Config, *, dry_run: bool = False, force: bool = False, lim
         # a trailing bucket cell; strip the bucket for write_tab_data, which
         # expects the same full-row format as every other tab.
         tab_writes.append((other_tab, [r[:-1] for r in other_log]))
+        # Tab cleanup: delete stale country tabs from a prior run that are
+        # NOT in this run's tab list (plus the always-written Total
+        # Statistics tab). PROTECTED_TABS ('Form Responses 1', 'CRM') are
+        # never deleted. Done before create_sheet_tab so the write loop
+        # only recreates tabs this run actually writes.
+        new_tab_titles = [title for title, _ in tab_writes] + ["Total Statistics"]
+        try:
+            _cleanup_stale_tabs(sheets_service, config.sheet_id, new_tab_titles)
+        except Exception as exc:
+            print(f"WARNING: tab cleanup failed: {type(exc).__name__}: {exc}", flush=True)
         for title, rows in tab_writes:
             create_sheet_tab(sheets_service, config.sheet_id, title)
             write_tab_data(sheets_service, config.sheet_id, title, rows, header=OUTPUT_HEADER)

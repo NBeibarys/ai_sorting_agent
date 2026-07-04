@@ -142,6 +142,44 @@ def write_tab_data(sheets_service, sheet_id: str, title: str, rows, header: list
     ).execute()
 
 
+def list_existing_tab_titles(sheets_service, spreadsheet_id: str) -> list[str]:
+    """Return the titles of every tab currently in the spreadsheet.
+
+    Used by tab cleanup to find stale country tabs left over from a prior run
+    that are no longer in the current run's tab list.
+    """
+    meta = (
+        sheets_service.spreadsheets()
+        .get(spreadsheetId=spreadsheet_id, fields="sheets/properties")
+        .execute()
+    )
+    return [
+        sheet.get("properties", {}).get("title")
+        for sheet in meta.get("sheets", [])
+        if sheet.get("properties", {}).get("title")
+    ]
+
+
+def delete_sheet_tab(sheets_service, sheet_id: str, title: str) -> None:
+    """Delete a tab from the spreadsheet by title.
+
+    Looks up the integer sheetId for the title, then issues a batchUpdate
+    with a deleteSheet request. Silently does nothing if the tab does not exist
+    (idempotent: a prior cleanup run may have already removed it).
+    """
+    sheet_id_int = get_sheet_id_by_title(sheets_service, sheet_id, title)
+    if sheet_id_int is None:
+        return
+    body = {
+        "requests": [
+            {"deleteSheet": {"sheetId": sheet_id_int}}
+        ]
+    }
+    sheets_service.spreadsheets().batchUpdate(
+        spreadsheetId=sheet_id, body=body
+    ).execute()
+
+
 def get_sheet_id_by_title(sheets_service, spreadsheet_id, title):
     """Return the integer sheetId for a tab by its title.
 
