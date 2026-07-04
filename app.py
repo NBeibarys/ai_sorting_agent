@@ -232,7 +232,6 @@ def _build_config(
         google_cloud_project=os.environ.get("GOOGLE_CLOUD_PROJECT", ""),
         google_cloud_location=os.environ.get("GOOGLE_CLOUD_LOCATION", "us-central1"),
         model=os.environ.get("SORTER_MODEL", "gemini-3.5-flash"),
-        max_concurrency=int(os.environ.get("MAX_CONCURRENCY", "8")),
         checkpoint_path=f"checkpoint_{sheet_name.lower()}.json",
         country_column=classify_col,
         name_column=name_col,
@@ -240,29 +239,17 @@ def _build_config(
         email_column=email_col,
         telegram_column=telegram_col,
         pitch_deck_column=pitch_deck_col,
-        incorporated_column=os.environ.get(
-            "SORTER_INCORPORATED_COLUMN", "where is your startup incorporated"
-        ),
-        revenue_column=os.environ.get(
-            "SORTER_REVENUE_COLUMN", "what was your revenue"
-        ),
-        video_column=os.environ.get("SORTER_VIDEO_COLUMN", "video pitching"),
         dedup_column=dedup_col,
     )
 
 
 def _run_classify_with_selections(config: Config, selected_countries: list[str]):
-    """Run run_batch with the pipeline's country routing patched so only
-    the user-selected countries get dedicated output tabs.
+    """Run run_batch with the user-selected countries passed as parameters.
 
-    Patches pipeline_mod.TARGET_TABS (used by _route_rows, _print_summary,
-    run_batch) and pipeline_mod._is_mena (used by _route_rows). Restored in a
-    finally block so a Streamlit rerun of the script does not see stale state.
-
-    - Selected target countries: kept in TARGET_TABS -> dedicated tab.
+    - Selected target countries: kept in target_tabs -> dedicated tab.
     - Deselected target countries: fall through to Other Countries.
-    - MENA selected: original _is_mena behavior (rows go to MENA tab).
-    - MENA deselected: _is_mena forced False -> MENA rows go to Other.
+    - MENA selected: mena_enabled=True -> rows go to MENA tab.
+    - MENA deselected: mena_enabled=False -> MENA rows go to Other.
     """
     selected_set = set(selected_countries)
     filtered_tabs = OrderedDict(
@@ -270,15 +257,10 @@ def _run_classify_with_selections(config: Config, selected_countries: list[str])
         if k in selected_set
     )
     mena_selected = "MENA" in selected_set
-    orig_tabs = pipeline_mod.TARGET_TABS
-    orig_is_mena = pipeline_mod._is_mena
-    pipeline_mod.TARGET_TABS = filtered_tabs
-    pipeline_mod._is_mena = orig_is_mena if mena_selected else (lambda _raw: False)
-    try:
-        return run_batch(config, dry_run=False, force=False)
-    finally:
-        pipeline_mod.TARGET_TABS = orig_tabs
-        pipeline_mod._is_mena = orig_is_mena
+    return run_batch(
+        config, dry_run=False, force=False,
+        target_tabs=filtered_tabs, mena_enabled=mena_selected,
+    )
 
 
 class _StreamlitStream:
@@ -366,10 +348,6 @@ def main():
     email_col = _auto_detect_column(headers, _COL_NEEDLES["email"])
     telegram_col = _auto_detect_column(headers, _COL_NEEDLES["telegram"])
     pitch_deck_col = _auto_detect_column(headers, _COL_NEEDLES["pitch_deck"])
-
-    output_cols = st.sidebar.multiselect(
-        "Output Columns", headers, default=headers
-    )
 
     # ── Country selector ───────────────────────────────────────────────
     # Multi-select for which country tabs to generate. Default: all 9.
@@ -528,7 +506,6 @@ def main():
             fig_pie.update_traces(
                 textposition="inside",
                 textinfo="percent+label",
-                texttemplate="%{label}<br>%{percent}" if False else None,
             )
             # Hide labels on 0-count slices to avoid clutter
             fig_pie.update_traces(

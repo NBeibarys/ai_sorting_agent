@@ -37,13 +37,10 @@ TARGET_TABS = OrderedDict([
     ("Mong. Turkmenistan Tajikistan", "Mong. Turkmenistan Tajikistan"),
 ])
 
-COL_NEEDLES = {
-    "timestamp": ["timestamp"],
-    "incorporated": ["incorporated"],
-}
+COL_NEEDLES = {}  # name/country/founder/etc are added dynamically in _find_columns
 # Display-only reference columns: a missing needle yields "" instead of
-# crashing the whole batch -- same tolerance `incorporated` already has.
-OPTIONAL_NEEDLES = {"incorporated", "founder", "email", "telegram", "pitch_deck", "dedup"}
+# crashing the whole batch.
+OPTIONAL_NEEDLES = {"founder", "email", "telegram", "pitch_deck", "dedup"}
 
 # Output tab header: all 16 source columns written verbatim into every
 # output tab, one row per startup. Matches the alchemist sheet column order.
@@ -86,12 +83,18 @@ def _find_columns(header: list, config: Config) -> dict:
         "email": [config.email_column],
         "telegram": [config.telegram_column],
         "pitch_deck": [config.pitch_deck_column],
-        "dedup": [config.dedup_column],
     }
+    # Only add dedup needle if a column name is configured; an empty string
+    # needle would match every header ("" is a substring of anything).
+    if config.dedup_column:
+        needles["dedup"] = [config.dedup_column]
     lowered = [(_norm(h), i) for i, h in enumerate(header)]
     found = {}
     for key, key_needles in needles.items():
-        norm_needles = [_norm(n) for n in key_needles]
+        norm_needles = [_norm(n) for n in key_needles if _norm(n)]
+        if not norm_needles:
+            found[key] = None
+            continue
         idx = next(
             (i for low, i in lowered if any(n in low for n in norm_needles)),
             None,
@@ -110,27 +113,60 @@ _CITY_COUNTRY = {
     "andijan": "Uzbekistan", "andijon": "Uzbekistan", "namangan": "Uzbekistan",
     "fergana": "Uzbekistan", "fargona": "Uzbekistan", "nukus": "Uzbekistan",
     "karakalpakstan": "Uzbekistan", "qoraqolpog": "Uzbekistan",
+    # Cyrillic spellings
+    "тошкент": "Uzbekistan", "ташкент": "Uzbekistan", "самарканд": "Uzbekistan",
+    "андижан": "Uzbekistan", "наманган": "Uzbekistan", "фергана": "Uzbekistan",
+    "нукус": "Uzbekistan", "каракалпакстан": "Uzbekistan",
     "astana": "Kazakhstan", "almaty": "Kazakhstan", "karaganda": "Kazakhstan",
     "uralsk": "Kazakhstan", "petropavlovsk": "Kazakhstan",
+    "shymkent": "Kazakhstan", "aktobe": "Kazakhstan", "pavlodar": "Kazakhstan",
+    "oskemen": "Kazakhstan", "atyrau": "Kazakhstan",
+    # Cyrillic spellings
+    "астана": "Kazakhstan", "алматы": "Kazakhstan", "караганда": "Kazakhstan",
+    "петропавловск": "Kazakhstan", "шымкент": "Kazakhstan", "актобе": "Kazakhstan",
+    "павлодар": "Kazakhstan", "өскемен": "Kazakhstan", "оскемен": "Kazakhstan",
     "bishkek": "Kyrgyzstan",
+    # Cyrillic spellings
+    "бишкек": "Kyrgyzstan",
     "tbilisi": "Georgia",
+    # Cyrillic spellings
+    "тбилиси": "Georgia",
     "baku": "Azerbaijan",
+    # Cyrillic spellings
+    "баку": "Azerbaijan",
     "istanbul": "Turkiye", "ankara": "Turkiye", "izmir": "Turkiye",
+    # Cyrillic spellings
+    "стамбул": "Turkiye", "анкара": "Turkiye", "измир": "Turkiye",
     "ulaanbaatar": "Mong. Turkmenistan Tajikistan",
     "dushanbe": "Mong. Turkmenistan Tajikistan",
     "ashgabat": "Mong. Turkmenistan Tajikistan",
+    # Cyrillic spellings
+    "душанбе": "Mong. Turkmenistan Tajikistan",
+    "ашхабад": "Mong. Turkmenistan Tajikistan",
 }
 _COUNTRY_SYNONYMS = {
     "uzbekistan": "Uzbekistan", "uzbekiston": "Uzbekistan", "ozbekiston": "Uzbekistan",
+    "узбекистан": "Uzbekistan", "ўзбекистон": "Uzbekistan",
     "kazakhstan": "Kazakhstan", "kazahstan": "Kazakhstan", "kazakshtan": "Kazakhstan",
+    "казахстан": "Kazakhstan", "қазақстан": "Kazakhstan",
     "kyrgyzstan": "Kyrgyzstan", "kyrgyz republic": "Kyrgyzstan",
+    "кыргызстан": "Kyrgyzstan", "кыргыз республикасы": "Kyrgyzstan",
     "georgia": "Georgia",
+    "грузия": "Georgia",
     "azerbaijan": "Azerbaijan",
+    "азербайджан": "Azerbaijan",
     "turkiye": "Turkiye", "turkey": "Turkiye",
+    "турция": "Turkiye", "турkiye": "Turkiye",
     "united states": "USA", "united states of america": "USA", "san francisco": "USA",
+    "new york": "USA", "chicago": "USA", "boston": "USA", "seattle": "USA",
+    "austin": "USA", "miami": "USA", "los angeles": "USA", "silicon valley": "USA",
+    "denver": "USA", "dallas": "USA", "atlanta": "USA", "washington": "USA",
     "mongolia": "Mong. Turkmenistan Tajikistan",
     "turkmenistan": "Mong. Turkmenistan Tajikistan",
     "tajikistan": "Mong. Turkmenistan Tajikistan",
+    "монголия": "Mong. Turkmenistan Tajikistan",
+    "туркменистан": "Mong. Turkmenistan Tajikistan",
+    "таджикистан": "Mong. Turkmenistan Tajikistan",
 }
 
 # MENA countries get their own output tab. Matched against the normalized
@@ -157,21 +193,46 @@ def _is_mena(country_raw: str) -> bool:
 
 
 def deterministic_classify(country_raw: str) -> str:
-    """Local heuristic classifier -- only for --dry-run verification."""
+    """Local heuristic classifier -- only for --dry-run verification.
+
+    Implements first-mentioned-wins: scans the text left-to-right and returns
+    the bucket of the FIRST matching city or country synonym. This mirrors the
+    LLM classifier's Rule 1 (first-mentioned target-bucket country wins).
+    Cyrillic city/country spellings are included so the heuristic handles
+    the same messy multi-script input the LLM does.
+    """
     text = _norm(country_raw)
     if not text:
         return "Other"
+    # Build a combined list of (synonym, bucket) pairs, then find the
+    # earliest match position in the text. First-mentioned wins.
+    candidates = []
     for city, bucket in _CITY_COUNTRY.items():
-        if city in text:
-            return bucket
+        pos = text.find(city)
+        if pos >= 0:
+            candidates.append((pos, bucket))
     for syn, bucket in _COUNTRY_SYNONYMS.items():
-        if re.search(rf"\b{re.escape(syn)}\b", text):
-            return bucket
-    tokens = set(text.replace(",", " ").split())
-    if tokens.intersection({"usa", "us"}):
-        return "USA"
+        m = re.search(rf"\b{re.escape(syn)}\b", text)
+        if m:
+            candidates.append((m.start(), bucket))
+    # Token-level checks for short abbreviations that word-boundary regex
+    # would miss (e.g. "US/KZ" -> token "us" -> USA).
+    tokens = set(text.replace("/", " ").replace(",", " ").split())
+    if "usa" in tokens or "us" in tokens:
+        # Find position of first "us"/"usa" token for ordering.
+        for tok in ("usa", "us"):
+            pos = text.find(tok)
+            if pos >= 0:
+                candidates.append((pos, "USA"))
+                break
     if "kz" in tokens:
-        return "Kazakhstan"
+        pos = text.find("kz")
+        if pos >= 0:
+            candidates.append((pos, "Kazakhstan"))
+    if candidates:
+        # Sort by position; first-mentioned wins.
+        candidates.sort(key=lambda c: c[0])
+        return candidates[0][1]
     return "Other"
 
 
@@ -205,7 +266,11 @@ def _checkpoint_entry(value):
     return (value or "Other", False)
 
 
-def _route_rows(row_meta, buckets, errored_indices, *, dry_run, header_row, name_col):
+def _route_rows(
+    row_meta, buckets, errored_indices, *,
+    dry_run, header_row, name_col,
+    target_tabs=None, mena_enabled=True,
+):
     """Group classified rows into country buckets, a Human Review list, the
     MENA list, and the Other/excluded log. Returns (grouped, review_rows,
     mena_log, other_log, green_coords, red_coords).
@@ -213,8 +278,8 @@ def _route_rows(row_meta, buckets, errored_indices, *, dry_run, header_row, name
     Each entry in `row_meta` is a 3-tuple:
     (i, country_raw, full_row). `full_row` is the complete source row (all
     16 columns) copied verbatim into output tabs -- one row per startup, every
-    field. Output rows (grouped, review, mena_log, other_log) carry the full
-    source row; other_log appends the classifier bucket as a trailing cell
+    field. Output rows (grouped, mena_log, other_log) carry the full source
+    row; other_log appends the classifier bucket as a trailing cell
     (stripped before writing).
 
     Rows whose classifier flagged needs_review=True go to the Human Review list
@@ -227,7 +292,14 @@ def _route_rows(row_meta, buckets, errored_indices, *, dry_run, header_row, name
     Egypt, Algeria, Jordan, Pakistan) are routed to mena_log instead of
     other_log, regardless of the classifier's bucket label, so they land in the
     dedicated MENA tab. other_log keeps only non-target, non-MENA countries.
+
+    ``target_tabs`` overrides the module-level TARGET_TABS (used by the
+    dashboard to let the user deselect countries). When None, the module
+    default is used. ``mena_enabled=False`` forces all rows to other_log
+    (no MENA tab).
     """
+    if target_tabs is None:
+        target_tabs = TARGET_TABS
     grouped = defaultdict(list)
     review_rows = []
     mena_log = []
@@ -246,9 +318,9 @@ def _route_rows(row_meta, buckets, errored_indices, *, dry_run, header_row, name
             if not dry_run and i not in errored_indices:
                 red_coords.append((header_row + i, name_col))
             continue
-        if bucket in TARGET_TABS:
+        if bucket in target_tabs:
             grouped[bucket].append(out_row)
-        elif _is_mena(country_raw):
+        elif mena_enabled and _is_mena(country_raw):
             mena_log.append(out_row)
         else:
             other_log.append(out_row + [bucket])
@@ -257,10 +329,13 @@ def _route_rows(row_meta, buckets, errored_indices, *, dry_run, header_row, name
     return grouped, review_rows, mena_log, other_log, green_coords, red_coords
 
 
-def _print_summary(grouped: dict, other_log: list, review_rows: list, total: int, mena_log: list) -> None:
+def _print_summary(grouped: dict, other_log: list, review_rows: list, total: int, mena_log: list,
+                   target_tabs=None) -> None:
+    if target_tabs is None:
+        target_tabs = TARGET_TABS
     print("\n=== Summary ===", flush=True)
     placed = 0
-    for bucket in TARGET_TABS:
+    for bucket in target_tabs:
         n = len(grouped.get(bucket, []))
         placed += n
         print(f"  {bucket:32s} {n}")
@@ -322,7 +397,8 @@ def _deduplicate_rows(row_meta: list, rows: list, dedup_col_idx, *, column_name:
     return unique
 
 
-def run_batch(config: Config, *, dry_run: bool = False, force: bool = False, limit: int = 0):
+def run_batch(config: Config, *, dry_run: bool = False, force: bool = False, limit: int = 0,
+              target_tabs=None, mena_enabled: bool = True):
     # Dry-run reads from the same Google Sheet as a normal run (the legacy
     # local-CSV path pointed at a file that no longer exists). Dry-run still
     # skips sheet writes and uses the local heuristic classifier instead of
@@ -348,6 +424,12 @@ def run_batch(config: Config, *, dry_run: bool = False, force: bool = False, lim
     form_responses_sheet_id = get_sheet_id_by_title(
         sheets_service, config.sheet_id, config.sheet_range
     )
+    if form_responses_sheet_id is None:
+        print(
+            f"WARNING: source tab '{config.sheet_range}' not found in sheet "
+            f"{config.sheet_id} — cell coloring will be skipped.",
+            flush=True,
+        )
 
     workflow = None
     if not dry_run:
@@ -422,11 +504,8 @@ def run_batch(config: Config, *, dry_run: bool = False, force: bool = False, lim
     errors = {}
 
     if dry_run:
-        for (i, _item) in to_classify:
-            # Find this row's meta entry by source index i (row_meta is
-            # filtered post-dedup, so we can't index it by i directly).
-            meta = next((m for m in row_meta if m[0] == i), None)
-            country_raw = meta[1] if meta else ""
+        for (i, item) in to_classify:
+            country_raw = item["country_raw"]
             try:
                 buckets[i] = (deterministic_classify(country_raw), False)
             except Exception as exc:
@@ -458,10 +537,20 @@ def run_batch(config: Config, *, dry_run: bool = False, force: bool = False, lim
         try:
             batch_buckets = workflow.classify_batch(batch_items, on_chunk_done=_on_chunk_done)
         except Exception as exc:
+            # Only overwrite rows NOT already classified by on_chunk_done.
+            # buckets[i] is None until set by the callback; ("Other", False)
+            # is a tuple, so `is None` distinguishes "not classified" from
+            # "classified as Other". This prevents a mid-batch crash after
+            # partial success from clobbering already-checkpointed results.
+            failed = 0
             for (i, _item) in to_classify:
-                errors[f"row_{i}"] = f"batch: {type(exc).__name__}: {exc}"
-                buckets[i] = ("Other", False)
-            print(f"Batch classify FAILED ({len(to_classify)} rows) -- {type(exc).__name__}: {exc}", flush=True)
+                if buckets[i] is None:
+                    errors[f"row_{i}"] = f"batch: {type(exc).__name__}: {exc}"
+                    buckets[i] = ("Other", False)
+                    failed += 1
+            print(f"Batch classify FAILED ({failed} unclassified rows marked Other; "
+                  f"{len(to_classify) - failed} already classified by earlier chunks) -- "
+                  f"{type(exc).__name__}: {exc}", flush=True)
         else:
             for idx, (i, _item) in enumerate(to_classify):
                 entry = batch_buckets[idx] if idx < len(batch_buckets) else ("Other", False)
@@ -480,13 +569,14 @@ def run_batch(config: Config, *, dry_run: bool = False, force: bool = False, lim
     grouped, review_rows, mena_log, other_log, green_coords, red_coords = _route_rows(
         row_meta, buckets, errored_indices,
         dry_run=dry_run, header_row=header_row, name_col=cols["name"],
+        target_tabs=target_tabs, mena_enabled=mena_enabled,
     )
 
-    _print_summary(grouped, other_log, review_rows, total, mena_log)
+    _print_summary(grouped, other_log, review_rows, total, mena_log, target_tabs=target_tabs)
     if dry_run:
         print("\nDry-run: skipped sheet writes -- no tabs created or modified.", flush=True)
     else:
-        if green_coords or red_coords:
+        if (green_coords or red_coords) and form_responses_sheet_id is not None:
             try:
                 color_cells_batch(sheets_service, config.sheet_id, form_responses_sheet_id, green_coords, red_coords)
             except Exception as exc:
@@ -495,15 +585,17 @@ def run_batch(config: Config, *, dry_run: bool = False, force: bool = False, lim
         review_tab = "Human Review"
         mena_tab = "MENA"
         other_tab = "Other Countries"
+        effective_tabs = target_tabs if target_tabs is not None else TARGET_TABS
         tab_writes = [
             (title, grouped.get(bucket, []))
-            for bucket, title in TARGET_TABS.items()
+            for bucket, title in effective_tabs.items()
         ]
         tab_writes.append((review_tab, review_rows))
         # MENA countries (Qatar, UAE, Oman, Egypt, Algeria, Jordan, Pakistan)
         # get their own visible tab. mena_log rows carry the full source row
         # (all 16 columns) -- same format as every other tab.
-        tab_writes.append((mena_tab, mena_log))
+        if mena_enabled:
+            tab_writes.append((mena_tab, mena_log))
         # Non-target, non-MENA countries (Canada, China, Japan, etc.) get
         # their own visible tab. other_log rows carry the full source row plus
         # a trailing bucket cell; strip the bucket for write_tab_data, which

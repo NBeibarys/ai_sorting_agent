@@ -5,3 +5,5 @@ __pycache__/
 checkpoint*.json
 .env
 *.log
+service_account.json
+audit*.txt

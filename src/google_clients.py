@@ -124,10 +124,14 @@ def write_tab_data(sheets_service, sheet_id: str, title: str, rows, header: list
         elif len(cells) > width:
             cells = cells[:width]
         values.append(cells)
-    # Clear any prior content across a generous range before writing.
+    # Clear any prior content across the actual data extent before writing.
+    # Uses the header width to compute the last column letter (so a schema
+    # wider than Z is covered) and a generous row ceiling.
+    last_col_letter = _col_letter(width)
+    clear_end_row = max(len(values), 1) + 1000  # pad beyond new data
     sheets_service.spreadsheets().values().clear(
         spreadsheetId=sheet_id,
-        range=f"{title}!A1:Z100000",
+        range=f"{title}!A1:{last_col_letter}{clear_end_row}",
         body={},
     ).execute()
     sheets_service.spreadsheets().values().update(
@@ -157,45 +161,6 @@ def get_sheet_id_by_title(sheets_service, spreadsheet_id, title):
     return None
 
 
-def color_name_cell(sheets_service, spreadsheet_id, sheet_id_int, row_index, col_index):
-    """Color a single cell emerald green via batchUpdate repeatCell.
-
-    Marks processed rows in the source "Form Responses 1" tab: once a row is
-    classified, its startup-name cell gets a green background so an operator
-    can see at a glance which rows the pipeline has touched. Indices are
-    0-indexed (Sheets API GridRange convention) -- sheet row 2 / column B is
-    row_index=1, col_index=1.
-    """
-    sheets_service.spreadsheets().batchUpdate(
-        spreadsheetId=spreadsheet_id,
-        body={
-            "requests": [
-                {
-                    "repeatCell": {
-                        "range": {
-                            "sheetId": sheet_id_int,
-                            "startRowIndex": row_index,
-                            "endRowIndex": row_index + 1,
-                            "startColumnIndex": col_index,
-                            "endColumnIndex": col_index + 1,
-                        },
-                        "cell": {
-                            "userEnteredFormat": {
-                                "backgroundColor": {
-                                    "red": 0.0,
-                                    "green": 0.804,
-                                    "blue": 0.4,
-                                }
-                            }
-                        },
-                        "fields": "userEnteredFormat.backgroundColor",
-                    }
-                }
-            ]
-        },
-    ).execute()
-
-
 def color_cells_batch(
     sheets_service,
     spreadsheet_id,
@@ -208,7 +173,7 @@ def color_cells_batch(
 ):
     """Color cells emerald green or pleasant red in chunked batchUpdate calls.
 
-    Same per-cell formatting as color_name_cell(), but batches every cell into
+    Same per-cell formatting (emerald green / pleasant red), but batches every cell into
     spreadsheets().batchUpdate() calls so coloring N rows costs ceil(N/50)
     API calls instead of N. The Sheets write quota is 60/min; the per-row
     variant burned through it on a ~687-row run and 429'd the downstream tab
@@ -219,7 +184,8 @@ def color_cells_batch(
     datasets. The requests are therefore split into chunks of `chunk_size`
     (default 50) repeatCell requests, each sent as its own batchUpdate call.
     Transient transport errors (ssl.SSLError, ConnectionError, TimeoutError,
-    googleapiclient HttpError 5xx) are retried with exponential backoff.
+    googleapiclient HttpError 5xx) are retried with fixed backoff (5s/10s/15s/20s),
+    aligned with the chunk retry in workflow.py.
 
     green_coords: list of (row_index, col_index) 0-indexed tuples colored
     emerald green (red=0.0, green=0.804, blue=0.4) -- normal classifications.
@@ -278,6 +244,12 @@ def color_cells_batch(
             for m in ("ssl", "eof", "connection reset", "broken pipe", "timed out")
         )
 
+    # Fixed backoff aligned with workflow.py chunk retry (5s/10s/20s).
+    # The Sheets write quota is 60/min; a 429 means the quota is exhausted
+    # and retrying after 1-8s (the old exponential values) hits the same
+    # exhausted quota. 5s/10s/20s gives the quota window time to recover.
+    backoff_seconds = (5, 10, 20)
+
     total_chunks = (len(requests) + chunk_size - 1) // chunk_size
     for ci in range(0, len(requests), chunk_size):
         chunk = requests[ci : ci + chunk_size]
@@ -292,11 +264,11 @@ def color_cells_batch(
             except Exception as exc:
                 if attempt == max_retries or not _is_transient(exc):
                     raise
-                backoff = 2 ** (attempt - 1)
+                wait = backoff_seconds[min(attempt - 1, len(backoff_seconds) - 1)]
                 print(
                     f"WARNING: batchUpdate chunk {chunk_num}/{total_chunks} "
                     f"failed (attempt {attempt}/{max_retries}): "
-                    f"{type(exc).__name__}: {exc} -- retrying in {backoff}s",
+                    f"{type(exc).__name__}: {exc} -- retrying in {wait}s",
                     flush=True,
                 )
-                time.sleep(backoff)
+                time.sleep(wait)

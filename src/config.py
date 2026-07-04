@@ -21,7 +21,6 @@ class Config:
     google_cloud_project: str
     google_cloud_location: str
     model: str
-    max_concurrency: int
     checkpoint_path: str
     country_column: str
     name_column: str
@@ -29,9 +28,6 @@ class Config:
     email_column: str
     telegram_column: str
     pitch_deck_column: str
-    incorporated_column: str
-    revenue_column: str
-    video_column: str
     dedup_column: str
 
     @classmethod
@@ -69,7 +65,6 @@ class Config:
             google_cloud_project=google_cloud_project,
             google_cloud_location=google_cloud_location,
             model=os.environ.get("SORTER_MODEL", "gemini-3.5-flash"),
-            max_concurrency=int(os.environ.get("MAX_CONCURRENCY", "8")),
             checkpoint_path=os.environ.get("CHECKPOINT_PATH", "checkpoint.json"),
             country_column=os.environ.get(
                 "SORTER_COUNTRY_COLUMN",
@@ -83,15 +78,6 @@ class Config:
             telegram_column=os.environ.get("SORTER_TELEGRAM_COLUMN", "telegram account"),
             pitch_deck_column=os.environ.get(
                 "SORTER_PITCH_DECK_COLUMN", "pitch deck"
-            ),
-            incorporated_column=os.environ.get(
-                "SORTER_INCORPORATED_COLUMN", "where is your startup incorporated"
-            ),
-            revenue_column=os.environ.get(
-                "SORTER_REVENUE_COLUMN", "what was your revenue"
-            ),
-            video_column=os.environ.get(
-                "SORTER_VIDEO_COLUMN", "video pitching"
             ),
             dedup_column=os.environ.get("DEDUP_COLUMN", "Startup name"),
         )

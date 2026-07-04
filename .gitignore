@@ -30,3 +30,4 @@ venv/
 Thumbs.db
 .vscode/
 .idea/
+audit*.txt
