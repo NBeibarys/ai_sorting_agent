@@ -47,19 +47,26 @@ def _safe_bucket(bucket) -> str:
 
 
 class AdkSorterWorkflow:
-    """Owns only immutable configuration; each invocation is isolated."""
+    """Owns only immutable configuration; each invocation is isolated.
+
+    The root agent is built once in __init__ (audit_v3 BUG 6): ADK agents are
+    config-only and reusable; the per-invocation session (InMemorySessionService
+    + unique session_id) provides isolation, so rebuilding the agent on every
+    chunk was wasted work (14 rebuilds for a 7-chunk batch).
+    """
 
     def __init__(self, model: str, country_field_label: str = ""):
         os.environ["SSL_CERT_FILE"] = certifi.where()
         self.model = model
         self.country_field_label = country_field_label
+        self._agent = build_root_agent(model, country_field_label)
 
     async def _invoke_async(self, country_items: list[dict]) -> tuple[dict, dict]:
         """Run classifier -> verifier on a batch. Returns (cls_by_row_id, ver_by_row_id)."""
         session_service = InMemorySessionService()
         runner = Runner(
             app_name=APP_NAME,
-            agent=build_root_agent(self.model, self.country_field_label),
+            agent=self._agent,
             session_service=session_service,
         )
         session_id = uuid.uuid4().hex
@@ -185,7 +192,7 @@ class AdkSorterWorkflow:
         country_items: list[dict],
         *,
         on_chunk_done=None,
-    ) -> list[tuple[str, bool]]:
+    ) -> tuple[list[tuple[str, bool]], set[int]]:
         """Classify a batch of rows; return (bucket, needs_review) tuples in input order.
 
         Input:  [{"row_id": 0, "country_raw": "Astana"}, ...]
@@ -199,10 +206,13 @@ class AdkSorterWorkflow:
         successful chunk, on_chunk_done(merged_for_this_chunk) is invoked so
         the caller can checkpoint progress and avoid re-paying for re-run
         chunks on a mid-batch crash. Results are concatenated in row_id order.
-        Interface unchanged from non-chunked version.
+        Interface changed in audit_v3: returns (results_list, errored_rids)
+        where errored_rids is the set of row_ids whose chunk exhausted all
+        retries and was marked 'Other'. Callers can surface these in their
+        error report so a fully-failed chunk is visible (not silently 'Other').
         """
         if not country_items:
-            return []
+            return [], set()
 
         total = len(country_items)
         all_merged: dict[int, tuple[str, bool]] = {}
@@ -264,8 +274,9 @@ class AdkSorterWorkflow:
                 out.append(("Other", False))
                 continue
             out.append(all_merged.get(rid, ("Other", False)))
-        return out
+        return out, errored_rids
 
     def classify(self, country_raw: str) -> tuple[str, bool]:
         """Single-row wrapper around classify_batch (for --limit 1 testing)."""
-        return self.classify_batch([{"row_id": 0, "country_raw": country_raw}])[0]
+        results, _errored = self.classify_batch([{"row_id": 0, "country_raw": country_raw}])
+        return results[0]

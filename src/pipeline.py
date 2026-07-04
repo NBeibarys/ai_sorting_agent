@@ -535,7 +535,7 @@ def run_batch(config: Config, *, dry_run: bool = False, force: bool = False, lim
             _save_checkpoint(config.checkpoint_path, checkpoint)
 
         try:
-            batch_buckets = workflow.classify_batch(batch_items, on_chunk_done=_on_chunk_done)
+            batch_buckets, failed_rids = workflow.classify_batch(batch_items, on_chunk_done=_on_chunk_done)
         except Exception as exc:
             # Only overwrite rows NOT already classified by on_chunk_done.
             # buckets[i] is None until set by the callback; ("Other", False)
@@ -557,7 +557,19 @@ def run_batch(config: Config, *, dry_run: bool = False, force: bool = False, lim
                 buckets[i] = entry
                 checkpoint[f"row_{i}"] = {"bucket": entry[0], "needs_review": entry[1]}
             _save_checkpoint(config.checkpoint_path, checkpoint)
-            print(f"Batch classify done ({len(to_classify)} rows).", flush=True)
+            # Surface rows whose chunk exhausted all retries (returned 'Other'
+            # but not because the LLM said so) in the errors dict so the final
+            # CLI report and exit code reflect the partial failure.
+            rid_to_i = {item["row_id"]: i for (i, item) in to_classify}
+            for rid in failed_rids:
+                idx = rid_to_i.get(rid)
+                if idx is not None:
+                    errors[f"row_{idx}"] = "chunk exhausted all retries; marked Other"
+            if failed_rids:
+                print(f"Batch classify done ({len(to_classify)} rows; "
+                      f"{len(failed_rids)} rows in failed chunk(s) marked Other).", flush=True)
+            else:
+                print(f"Batch classify done ({len(to_classify)} rows).", flush=True)
 
     errored_indices = set()
     for k in errors:

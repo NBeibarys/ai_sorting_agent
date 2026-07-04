@@ -184,8 +184,8 @@ def color_cells_batch(
     datasets. The requests are therefore split into chunks of `chunk_size`
     (default 50) repeatCell requests, each sent as its own batchUpdate call.
     Transient transport errors (ssl.SSLError, ConnectionError, TimeoutError,
-    googleapiclient HttpError 5xx) are retried with fixed backoff (5s/10s/15s/20s),
-    aligned with the chunk retry in workflow.py.
+    googleapiclient HttpError 5xx) are retried with fixed backoff (5s/10s/20s,
+    clamped on the 4th attempt), aligned with the chunk retry in workflow.py.
 
     green_coords: list of (row_index, col_index) 0-indexed tuples colored
     emerald green (red=0.0, green=0.804, blue=0.4) -- normal classifications.

@@ -6,10 +6,13 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application code and service account
+# Copy application code.
+# service_account.json is NOT copied into the image: it is gitignored and
+# .dockerignore-excluded to keep the secret out of the build context. At
+# runtime it is provided via GOOGLE_APPLICATION_CREDENTIALS (env var) set
+# to a Cloud Run secret mount / mounted volume. See README.md.
 COPY src/ ./src/
 COPY app.py .
-COPY service_account.json .
 
 EXPOSE 8501
 

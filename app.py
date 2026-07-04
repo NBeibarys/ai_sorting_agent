@@ -184,14 +184,13 @@ def _read_total_stats(sheet_id: str) -> tuple[pd.DataFrame, int]:
         data.append({"Country": country, "Count": count})
 
     df = pd.DataFrame(data)
-    if not df.empty:
-        total = df["Count"].sum()
-        df["Percentage"] = (df["Count"] / total * 100).round(1) if total else 0.0
-    else:
-        df["Percentage"] = pd.Series(dtype=float)
-
     if grand_total == 0 and not df.empty:
         grand_total = int(df["Count"].sum())
+
+    if not df.empty and grand_total:
+        df["Percentage"] = (df["Count"] / grand_total * 100).round(1)
+    else:
+        df["Percentage"] = pd.Series(dtype=float)
 
     return df, grand_total
 
@@ -537,8 +536,14 @@ def main():
         df = pd.DataFrame(rows, columns=header)
 
         # Startup table shows ONLY the name column and the classify column.
-        # Auto-detect the startup/name column by header substring match.
-        name_candidates = [c for c in df.columns if "startup" in c.lower() or "name" in c.lower()]
+        # Auto-detect the startup/name column by header substring match, but
+        # exclude CEO/founder columns (which also contain "name") so the table
+        # highlights the startup name, not the founder/CEO name.
+        name_candidates = [
+            c for c in df.columns
+            if ("startup" in c.lower() or "name" in c.lower())
+            and "ceo" not in c.lower() and "founder" not in c.lower()
+        ]
         name_col = name_candidates[0] if name_candidates else None
 
         keep: list[str] = []
