@@ -5,5 +5,5 @@ __pycache__/
 checkpoint*.json
 .env
 *.log
-service_account.json
+# service_account.json - needed in image for Cloud Run
 audit*.txt
