@@ -334,17 +334,35 @@ def main():
     default_dedup_idx = _default_index(headers, _COL_NEEDLES["name"])
     dedup_col = st.sidebar.selectbox("Dedup Column", headers, index=default_dedup_idx)
 
+    # Email column — user-selectable for email-based dedup. Defaults to the
+    # header containing "email" (e.g. "Email Address" or "CEO's email"). A
+    # "(none)" option lets the user skip email-based dedup entirely; in that
+    # case pipeline.py drops the email pass and runs exact + fuzzy only.
+    _NONE = "(none)"
+    email_options = [_NONE] + headers
+    default_email_idx = _default_index(headers, _COL_NEEDLES["email"]) + 1
+    email_col = st.sidebar.selectbox(
+        "Email Column",
+        email_options,
+        index=default_email_idx,
+        help=(
+            "Used ONLY for the email-based dedup pass. Pick '(none)' to "
+            "skip email dedup and run exact + fuzzy name dedup only."
+        ),
+    )
+    if email_col == _NONE:
+        email_col = ""  # empty -> pipeline skips email dedup gracefully
+
     # ── Auto-detected column mappings (not user-selectable) ────────────
-    # founder / email / telegram / pitch-deck / startup-name are all
-    # auto-detected from the sheet headers via substring matching, so the
-    # app works for Alchemist, R2B, or any future sheet without code
-    # changes. Only the startup-name column is also used as the default
-    # for the Dedup dropdown above.
+    # founder / telegram / pitch-deck / startup-name are all auto-detected
+    # from the sheet headers via substring matching, so the app works for
+    # Alchemist, R2B, or any future sheet without code changes. Email and
+    # the dedup column are user-selectable (above) since they drive the
+    # dedup passes directly.
     name_col = _auto_detect_column(
         headers, _COL_NEEDLES["name"], exclude=["ceo", "founder"]
     )
     founder_col = _auto_detect_column(headers, _COL_NEEDLES["founder"])
-    email_col = _auto_detect_column(headers, _COL_NEEDLES["email"])
     telegram_col = _auto_detect_column(headers, _COL_NEEDLES["telegram"])
     pitch_deck_col = _auto_detect_column(headers, _COL_NEEDLES["pitch_deck"])
 
