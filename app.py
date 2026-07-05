@@ -551,14 +551,22 @@ def main():
         st.error(f"Could not connect to Google Sheets: {exc}")
 
     if svc:
-        # Check which country tabs actually have data
-        for tab_name in COUNTRY_TABS:
-            try:
-                h, r = read_sheet_rows(svc, sheet_id, tab_name)
-                if r:
-                    available_tabs.append(tab_name)
-            except Exception:
-                pass
+        # Get all sheet tab names in ONE API call (batchGet) instead of
+        # checking each tab individually (avoids 60 read/min rate limit).
+        try:
+            spreadsheet = svc.spreadsheets().get(
+                spreadsheetId=sheet_id, fields="sheets(properties.title,properties.gridProperties)"
+            ).execute()
+            existing_tab_titles = {
+                s["properties"]["title"]
+                for s in spreadsheet.get("sheets", [])
+            }
+            # Only show country tabs that exist in the sheet
+            available_tabs = [
+                t for t in COUNTRY_TABS if t in existing_tab_titles
+            ]
+        except Exception:
+            available_tabs = list(COUNTRY_TABS)  # fallback: show all
 
     if available_tabs:
         selected_tab = st.selectbox(
