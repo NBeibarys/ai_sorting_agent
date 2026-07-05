@@ -56,28 +56,6 @@ COL_NEEDLES = {}  # name/country/founder/etc are added dynamically in _find_colu
 # crashing the whole batch.
 OPTIONAL_NEEDLES = {"founder", "email", "telegram", "pitch_deck", "dedup"}
 
-# Output tab header: all 16 source columns written verbatim into every
-# output tab, one row per startup. Matches the alchemist sheet column order.
-OUTPUT_HEADER = [
-    "Timestamp",
-    "Email Address",
-    "Score",
-    "Startup name",
-    "Which country do most of your team members come from?",
-    "Startup website",
-    "What specific problem does your company solve for B2B customers?",
-    "What was your revenue in 2025 and 2026 (in USD)?",
-    "Please share your pitch deck presentation link",
-    "Please insert link to a <3 min video pitching in English",
-    "What is the full name of your CEO?",
-    "What is your CEO's email?",
-    "What is your CEO's Telegram account (or Whatsapp number)?",
-    "Is your startup entity registered in Delaware (U.S.)?",
-    "Do you have a VISA to travel to the United States?",
-    "Where is your startup incorporated?",
-]
-
-
 
 def _norm(text: str) -> str:
     """Accent-folded lowercase for heuristic matching only."""
@@ -769,7 +747,7 @@ def run_batch(config: Config, *, dry_run: bool = False, force: bool = False, lim
             print(f"WARNING: tab cleanup failed: {type(exc).__name__}: {exc}", flush=True)
         for title, rows in tab_writes:
             create_sheet_tab(sheets_service, config.sheet_id, title)
-            write_tab_data(sheets_service, config.sheet_id, title, rows, header=OUTPUT_HEADER)
+            write_tab_data(sheets_service, config.sheet_id, title, rows, header=header)
         print(f"\nWrote {len(tab_writes)} tabs into sheet {config.sheet_id}", flush=True)
         # Total Statistics: compute from in-memory tab_writes (not by reading
         # the sheet back, which can return stale data due to API eventual
