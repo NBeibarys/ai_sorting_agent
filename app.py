@@ -590,12 +590,12 @@ def main():
         df = pd.DataFrame(rows, columns=header)
 
         # Show ONLY 2 columns:
-        # Column 1: ALWAYS "Startup name" (hardcoded - not user-selectable)
+        # Column 1: dedup_col (Startup name selected by user in sidebar)
         # Column 2: classify_col (Classification column selected by user in sidebar)
         keep: list[str] = []
-        if "Startup name" in df.columns:
-            keep.append("Startup name")
-        if classify_col in df.columns and classify_col != "Startup name":
+        if dedup_col in df.columns:
+            keep.append(dedup_col)
+        if classify_col in df.columns and classify_col != dedup_col:
             keep.append(classify_col)
 
         df = df[keep] if keep else df
