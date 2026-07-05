@@ -589,18 +589,13 @@ def main():
     if header and rows:
         df = pd.DataFrame(rows, columns=header)
 
-        # Show ONLY 2 columns: startup name + classify column
-        name_candidates = [
-            c for c in df.columns
-            if ("startup" in c.lower() or "name" in c.lower())
-            and "ceo" not in c.lower() and "founder" not in c.lower()
-        ]
-        name_col = name_candidates[0] if name_candidates else None
-
+        # Show ONLY 2 columns:
+        # Column 1: dedup_col (Startup name selected by user in sidebar)
+        # Column 2: classify_col (Classification column selected by user in sidebar)
         keep: list[str] = []
-        if name_col:
-            keep.append(name_col)
-        if classify_col in df.columns and classify_col != name_col:
+        if dedup_col in df.columns:
+            keep.append(dedup_col)
+        if classify_col in df.columns and classify_col != dedup_col:
             keep.append(classify_col)
 
         df = df[keep] if keep else df
