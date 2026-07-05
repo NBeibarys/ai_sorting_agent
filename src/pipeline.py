@@ -39,19 +39,17 @@ TARGET_TABS = OrderedDict([
     ("Mong. Turkmenistan Tajikistan", "Mong. Turkmenistan Tajikistan"),
 ])
 
-# Tabs that must NEVER be deleted by tab cleanup, even if they are not in
-# the current run's tab list. These hold source data or cross-run state.
-PROTECTED_TABS = {
-    "Form Responses 1",
-    "Total Statistics",
-    "CRM",
-}
+# Tabs that the algorithm can create. Used by _cleanup_stale_tabs to
+# determine which tabs are safe to delete: ONLY tabs in this set can
+# be deleted. Any tab NOT in this set (CRM, Form Responses 1, custom
+# tabs, etc.) is NEVER deleted.
+ALGORITHM_TABS = set(TARGET_TABS.keys()) | {"Human Review", "MENA", "Other Countries"}
 
 
-def _is_protected_tab(title: str) -> bool:
+def _is_algorithm_tab(title: str) -> bool:
     """Case-insensitive check with whitespace stripping."""
     clean = title.strip().lower()
-    return clean in {t.lower() for t in PROTECTED_TABS}
+    return clean in {t.lower() for t in ALGORITHM_TABS}
 
 COL_NEEDLES = {}  # name/country/founder/etc are added dynamically in _find_columns
 # Display-only reference columns: a missing needle yields "" instead of
@@ -510,7 +508,7 @@ def _cleanup_stale_tabs(sheets_service, sheet_id: str, new_tab_titles: list) -> 
     """Delete tabs that exist in the sheet but are NOT in this run's tab list.
 
     Prevents stale country tabs from a prior run lingering with old data.
-    Tabs in PROTECTED_TABS ('Form Responses 1', 'Total Statistics', 'CRM')
+    Only ALGORITHM_TABS (country output tabs) can be deleted
     are never deleted. Returns the list of deleted tab titles (for logging).
 
     Idempotent and safe: each delete is a separate batchUpdate, a transient
@@ -521,7 +519,7 @@ def _cleanup_stale_tabs(sheets_service, sheet_id: str, new_tab_titles: list) -> 
     new_set = set(new_tab_titles)
     to_delete = [
         title for title in existing
-        if title not in new_set and not _is_protected_tab(title)
+        if title not in new_set and _is_algorithm_tab(title)
     ]
     if not to_delete:
         return []
@@ -761,7 +759,7 @@ def run_batch(config: Config, *, dry_run: bool = False, force: bool = False, lim
         tab_writes.append((other_tab, [r[:-1] for r in other_log]))
         # Tab cleanup: delete stale country tabs from a prior run that are
         # NOT in this run's tab list (plus the always-written Total
-        # Statistics tab). PROTECTED_TABS ('Form Responses 1', 'CRM') are
+        # Statistics tab). Non-algorithm tabs (CRM, Form Responses 1, etc.) are
         # never deleted. Done before create_sheet_tab so the write loop
         # only recreates tabs this run actually writes.
         new_tab_titles = [title for title, _ in tab_writes] + ["Total Statistics"]
