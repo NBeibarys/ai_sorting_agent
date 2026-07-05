@@ -47,6 +47,12 @@ PROTECTED_TABS = {
     "CRM",
 }
 
+
+def _is_protected_tab(title: str) -> bool:
+    """Case-insensitive check with whitespace stripping."""
+    clean = title.strip().lower()
+    return clean in {t.lower() for t in PROTECTED_TABS}
+
 COL_NEEDLES = {}  # name/country/founder/etc are added dynamically in _find_columns
 # Display-only reference columns: a missing needle yields "" instead of
 # crashing the whole batch.
@@ -429,24 +435,25 @@ def _deduplicate_rows(
 
     total = len(row_meta)
     removed = {"exact": 0, "email": 0, "fuzzy": 0}
-    kept: list = []  # list of meta_entry
+    # Keep LATEST duplicate: iterate in reverse so later rows overwrite
+    # earlier ones in the seen sets. Then reverse back to original order.
+    kept_reversed: list = []
     seen_exact: set = set()
     seen_emails: set = set()
     seen_fuzzy_names: set = set()
 
-    for meta_entry in row_meta:
+    for meta_entry in reversed(row_meta):
         i = meta_entry[0]
         raw = _cell_val(dedup_col_idx, i)
         exact_key = raw.lower()
         if not exact_key:
             # Empty dedup value -> never an exact duplicate; keep this row
-            # but still let email/fuzzy passes compare it.
             exact_key = None
         # PASS 1: exact dedup
         if exact_key is not None and exact_key in seen_exact:
             removed["exact"] += 1
             print(
-                f"  dedup-exact: row {i} dropped (duplicate of earlier row "
+                f"  dedup-exact: row {i} dropped (duplicate of LATER row "
                 f"on '{column_name}': {raw!r})",
                 flush=True,
             )
@@ -461,7 +468,7 @@ def _deduplicate_rows(
                 removed["email"] += 1
                 print(
                     f"  dedup-email: row {i} dropped (same email {email!r} "
-                    f"as an earlier row)",
+                    f"as a LATER row)",
                     flush=True,
                 )
                 continue
@@ -475,12 +482,14 @@ def _deduplicate_rows(
                 removed["fuzzy"] += 1
                 print(
                     f"  dedup-fuzzy: row {i} dropped (normalized name "
-                    f"{fuzzy_key!r} matches an earlier row)",
+                    f"{fuzzy_key!r} matches a LATER row)",
                     flush=True,
                 )
                 continue
             seen_fuzzy_names.add(fuzzy_key)
-        kept.append(meta_entry)
+        kept_reversed.append(meta_entry)
+
+    kept = list(reversed(kept_reversed))
 
     total_removed = sum(removed.values())
     print(
@@ -512,7 +521,7 @@ def _cleanup_stale_tabs(sheets_service, sheet_id: str, new_tab_titles: list) -> 
     new_set = set(new_tab_titles)
     to_delete = [
         title for title in existing
-        if title not in new_set and title not in PROTECTED_TABS
+        if title not in new_set and not _is_protected_tab(title)
     ]
     if not to_delete:
         return []
