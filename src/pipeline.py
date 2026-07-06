@@ -369,35 +369,37 @@ def _deduplicate_rows(
     dedup_col_idx,
     *,
     column_name: str,
-    email_col_idx=None,
     name_col_idx=None,
 ) -> list:
-    """Drop duplicate rows by DEDUP_COLUMN value, then by email, then fuzzy name.
+    """Drop duplicate rows by DEDUP_COLUMN value, then fuzzy name.
 
-    Three passes (in order), each only dropping a row if it matches an
+    Two passes (in order), each only dropping a row if it matches an
     already-kept row from an EARLIER pass:
 
     1. EXACT match on the raw dedup cell (case-insensitive, whitespace
        stripped) -- same as the original behavior.
-    2. EMAIL match: if two kept rows share the same non-empty email, the
-       later one is dropped.
-    3. FUZZY name match: normalize names (strip punctuation, collapse
+    2. FUZZY name match: normalize names (strip punctuation, collapse
        whitespace, lowercase, accent-fold) and drop later rows whose
        normalized name matches an earlier kept row.
+
+    Email is intentionally NOT used for deduplication: a founder may
+    legitimately submit multiple distinct startups (e.g. RUNA and QORGAN
+    from the same email). Deduping on email was silently dropping real
+    distinct entries, so that pass was removed.
 
     Empty/null values are NEVER a duplicate (every empty row is kept).
     Only the first occurrence of each value is kept; later duplicates are
     dropped entirely and excluded from classification and output. Each
-    removed duplicate is logged with the reason ('exact', 'email', 'fuzzy').
+    removed duplicate is logged with the reason ('exact', 'fuzzy').
 
     `row_meta[i]` carries the original source row index in tuple position 0;
     that index is preserved so source-cell coloring still maps to the right
     row. `rows` is the raw source rows list so we can read cells directly
     via their column index.
 
-    `email_col_idx` and `name_col_idx` are optional column indices used by
-    the email and fuzzy passes. When None (no such column), those passes are
-    skipped and only exact dedup runs.
+    `name_col_idx` is an optional column index used by the fuzzy pass.
+    When None, the fuzzy pass falls back to the dedup column. If the dedup
+    column has no usable name, only exact dedup runs.
     """
     if not column_name or dedup_col_idx is None:
         return row_meta
@@ -410,12 +412,11 @@ def _deduplicate_rows(
         return ""
 
     total = len(row_meta)
-    removed = {"exact": 0, "email": 0, "fuzzy": 0}
+    removed = {"exact": 0, "fuzzy": 0}
     # Keep LATEST duplicate: iterate in reverse so later rows overwrite
     # earlier ones in the seen sets. Then reverse back to original order.
     kept_reversed: list = []
     seen_exact: set = set()
-    seen_emails: set = set()
     seen_fuzzy_names: set = set()
 
     for meta_entry in reversed(row_meta):
@@ -436,20 +437,7 @@ def _deduplicate_rows(
             continue
         if exact_key is not None:
             seen_exact.add(exact_key)
-        # PASS 2: email dedup
-        email = _cell_val(email_col_idx, i) if email_col_idx is not None else ""
-        if email:
-            email_key = email.lower()
-            if email_key in seen_emails:
-                removed["email"] += 1
-                print(
-                    f"  dedup-email: row {i} dropped (same email {email!r} "
-                    f"as a LATER row)",
-                    flush=True,
-                )
-                continue
-            seen_emails.add(email_key)
-        # PASS 3: fuzzy name dedup (name column is the dedup column)
+        # PASS 2: fuzzy name dedup (name column defaults to the dedup column)
         name_col = name_col_idx if name_col_idx is not None else dedup_col_idx
         name_val = _cell_val(name_col, i)
         fuzzy_key = _normalize_for_fuzzy(name_val)
@@ -470,12 +458,130 @@ def _deduplicate_rows(
     total_removed = sum(removed.values())
     print(
         f"Found {total_removed} duplicates in column '{column_name}' "
-        f"(exact={removed['exact']}, email={removed['email']}, "
-        f"fuzzy={removed['fuzzy']}), removing...",
+        f"(exact={removed['exact']}, fuzzy={removed['fuzzy']}), removing...",
         flush=True,
     )
     print(
         f"Deduplication: removed {total_removed} of {total} rows "
+        f"({len(kept)} unique remaining).",
+        flush=True,
+    )
+    return kept
+
+
+def _llm_semantic_dedup(
+    row_meta: list,
+    rows: list,
+    name_col_idx,
+    *,
+    workflow,
+) -> list:
+    """Second dedup pass: LLM checks surviving startup names semantically.
+
+    Runs AFTER the string-based pass (exact + fuzzy), which already caught
+    punctuation/case/whitespace variants. This pass catches semantic
+    duplicates the string pass missed -- e.g. 'RUNA Tech' vs 'RUNA
+    Technology' vs 'RUNA' -- by asking Gemini to group names referring to
+    the same startup.
+
+    A SINGLE LLM call is made for the whole batch of surviving names (chunked
+    only if the list exceeds 500 names). For each group with >1 entry, the
+    LATEST submission (highest source row index) is kept and earlier entries
+    are dropped, mirroring the string pass's keep-latest semantics. Each
+    removed row is logged with reason 'semantic'.
+
+    Conservative: any LLM error, empty result, or disabled flag means this
+    pass returns row_meta unchanged (keep everything). A false positive
+    (dropping a real distinct startup) is worse than a false negative
+    (keeping a duplicate).
+
+    `name_col_idx` is the column to read startup names from. `workflow` is
+    an AdkSorterWorkflow instance with `.dedup_names_batch()`.
+    """
+    if not row_meta or name_col_idx is None:
+        return row_meta
+
+    def _cell(idx: int, row_idx: int) -> str:
+        if idx is None or row_idx >= len(rows):
+            return ""
+        if 0 <= idx < len(rows[row_idx]):
+            return (rows[row_idx][idx] or "").strip()
+        return ""
+
+    # Map each distinct startup name -> list of row_meta entries that carry
+    # it. row_meta entries are 3-tuples (i, country_raw, full_row); source
+    # index i sorts ascending, so the LAST entry for a name is the latest
+    # submission.
+    name_to_entries: "OrderedDict[str, list]" = OrderedDict()
+    ordered_names: list[str] = []
+    for meta_entry in row_meta:
+        i = meta_entry[0]
+        name = _cell(name_col_idx, i)
+        if not name:
+            continue
+        if name not in name_to_entries:
+            name_to_entries[name] = []
+            ordered_names.append(name)
+        name_to_entries[name].append(meta_entry)
+
+    if len(ordered_names) < 2:
+        return row_meta  # nothing to compare
+
+    print(
+        f"LLM semantic dedup: checking {len(ordered_names)} unique startup "
+        f"names in a single batch...",
+        flush=True,
+    )
+    try:
+        groups = workflow.dedup_names_batch(ordered_names)
+    except Exception as exc:  # noqa: BLE001 - never drop startups on LLM failure
+        print(
+            f"LLM semantic dedup FAILED ({type(exc).__name__}: {exc}); "
+            f"skipping (keeping all rows).",
+            flush=True,
+        )
+        return row_meta
+
+    if not groups:
+        print("LLM semantic dedup: no semantic duplicates found.", flush=True)
+        return row_meta
+
+    # For each group, the entry with the highest source index i is kept;
+    # all earlier entries for that name are dropped. We track the id() of
+    # the meta_entry tuples to REMOVE (not keep) -- tuple identity lets us
+    # mark specific instances even when two rows share the same name.
+    drop_entry_ids: set = set()
+    dropped = 0
+    for group_names in groups:
+        # Gather all meta entries whose name is in this group, in source
+        # order (ascending i). id() lets us mark specific tuple instances.
+        entries_in_group: list = []
+        for n in group_names:
+            for meta_entry in name_to_entries.get(n, []):
+                entries_in_group.append(meta_entry)
+        if len(entries_in_group) < 2:
+            continue
+        # Sort by source row index ascending; keep the LAST (latest).
+        entries_in_group.sort(key=lambda e: e[0])
+        keep_entry = entries_in_group[-1]
+        for meta_entry in entries_in_group[:-1]:
+            drop_entry_ids.add(id(meta_entry))
+            dropped += 1
+            i = meta_entry[0]
+            keep_i = keep_entry[0]
+            print(
+                f"  dedup-semantic: row {i} dropped (same startup as row "
+                f"{keep_i} per LLM; names: {group_names!r})",
+                flush=True,
+            )
+
+    if dropped == 0:
+        print("LLM semantic dedup: no rows dropped.", flush=True)
+        return row_meta
+
+    kept = [e for e in row_meta if id(e) not in drop_entry_ids]
+    print(
+        f"LLM semantic dedup: removed {dropped} semantic duplicates "
         f"({len(kept)} unique remaining).",
         flush=True,
     )
@@ -605,9 +711,20 @@ def run_batch(config: Config, *, dry_run: bool = False, force: bool = False, lim
     row_meta = _deduplicate_rows(
         row_meta, rows, dedup_col_idx,
         column_name=config.dedup_column,
-        email_col_idx=cols.get("email"),
         name_col_idx=cols.get("name"),
     )
+
+    # Second dedup pass: LLM semantic dedup. Runs AFTER the string pass
+    # (exact + fuzzy) so we only pay for one LLM call on the surviving
+    # (string-unique) names. Catches semantic duplicates the string pass
+    # misses ('RUNA Tech' vs 'RUNA Technology' vs 'RUNA'). Skipped in
+    # dry-run (no LLM) and when LLM_DEDUP_ENABLED is false. Any LLM failure
+    # is non-fatal: the pass keeps all rows and logs a warning.
+    if not dry_run and config.llm_dedup_enabled and workflow is not None and row_meta:
+        row_meta = _llm_semantic_dedup(
+            row_meta, rows, cols.get("name"),
+            workflow=workflow,
+        )
     total = len(row_meta)  # post-dedup count, used for reporting/summary
 
     # buckets[i] = (bucket, needs_review) for row index i (None until set).

@@ -213,6 +213,73 @@ The classifier results you are verifying:
 """.strip()
 
 
+def build_dedup_instruction() -> str:
+    """Build the semantic dedup prompt for the LLM.
+
+    The LLM receives a JSON array of startup names and must return groups of
+    names that refer to the SAME startup. The prompt is deliberately
+    conservative: when in doubt, the LLM must NOT group names, because a false
+    positive (dropping a real distinct startup) is worse than a false negative
+    (keeping a duplicate). Distinct startups with similar names (e.g. RUNA vs
+    QORGAN) must never be grouped.
+    """
+    return """
+You are a semantic deduplication agent for a startup-applications dataset.
+
+The user message is a JSON ARRAY of strings. Each string is a startup name
+exactly as it was submitted in an application form. The same startup may have
+been submitted multiple times under slightly different spellings, punctuation,
+legal suffixes, or word order.
+
+Your job: find groups of names that refer to the SAME startup and return them
+as groups. Names that are NOT clearly the same startup must NOT be grouped.
+
+RULES (in order of precedence):
+1. ONLY group names that are CLEARLY the same startup. "Clearly the same"
+   means: same brand/token (RUNA, QORGAN, AgroAI) ignoring legal suffixes,
+   punctuation, accents, case, and minor spelling differences. Examples of
+   CLEAR same-startup groups:
+     ["RUNA", "RUNA Tech", "RUNA Technology"]
+     ["Agro ai", "AgroAi", "Agro.ai"]
+     ["Uzbek Telecom", "UzbekTelecom"]
+2. DO NOT group names that merely share a common word or topic but are
+   DIFFERENT startups. Examples that MUST NOT be grouped:
+     ["RUNA", "QORGAN"]  -- different brands, not the same startup
+     ["AgroAI", "AgroBot"] -- different brands sharing the "Agro" prefix
+3. WHEN IN DOUBT, DO NOT GROUP. A false positive (dropping a real distinct
+   startup) is worse than a false negative (keeping a duplicate). If you are
+   not confident two names are the same startup, leave them ungrouped.
+4. Ignore legal-entity suffixes when comparing: LLC, Ltd, Inc, Corp,
+   GmbH, OOO, AO, MChJ, and similar. "Foo LLC" and "Foo" are the same.
+5. Treat punctuation, accents, case, and whitespace as insignificant for
+   comparison, but DO use them as hints (a typo of a known brand is likely
+   the same startup).
+6. Never group an empty string with anything. Empty/blank names are not
+   startups and are not your concern.
+
+OUTPUT FORMAT -- you MUST return a JSON object matching the DedupGroups
+schema:
+  {
+    "groups": [
+      {
+        "names": ["RUNA", "RUNA Tech", "RUNA Technology"]
+      }
+    ]
+  }
+
+Each group MUST contain 2 or more names (a group of 1 is meaningless -- just
+omit it). Every name in a group MUST appear verbatim in the input array.
+Only group names that are clearly the same startup. When in doubt, omit the
+group.
+
+CRITICAL:
+- Return ONLY groups with 2+ members. Omit single-name "groups".
+- Do not invent names not present in the input.
+- Do not group names from different startups.
+- When in doubt, do not group.
+""".strip()
+
+
 # Backward-compatible module-level constants built with a generic default
 # label. New code should call build_sorter_instruction / build_head_instruction
 # with the actual sheet column label from Config.country_column.

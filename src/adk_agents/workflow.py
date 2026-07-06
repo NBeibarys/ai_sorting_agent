@@ -19,6 +19,8 @@ from google.adk.sessions import InMemorySessionService
 from google.genai import types
 
 from .agent import build_root_agent
+from .prompts import build_dedup_instruction
+from .schemas import DedupGroups
 
 APP_NAME = "startup_country_sorter"
 
@@ -60,6 +62,114 @@ class AdkSorterWorkflow:
         self.model = model
         self.country_field_label = country_field_label
         self._agent = build_root_agent(model, country_field_label)
+        # Lazy genai Client for the semantic-dedup pass. Vertex AI is already
+        # configured via env (GOOGLE_GENAI_USE_VERTEXAI / GOOGLE_CLOUD_PROJECT
+        # / GOOGLE_CLOUD_LOCATION) by Config.from_env, so a bare Client() picks
+        # up the same Vertex credentials the ADK path uses.
+        self._genai_client = None
+        self._dedup_instruction = build_dedup_instruction()
+
+    def _get_genai_client(self):
+        """Lazily build a google-genai Client bound to Vertex AI.
+
+        Built on first use (not in __init__) so a dry-run or a run with LLM
+        dedup disabled never pays the client-construction cost or trips over
+        env var ordering.
+        """
+        if self._genai_client is None:
+            from google import genai  # local import keeps module import cheap
+            self._genai_client = genai.Client()
+        return self._genai_client
+
+    async def _invoke_dedup_async(self, names: list[str]) -> list[list[str]]:
+        """One LLM call: ask Gemini to group semantically-equal startup names.
+
+        Returns a list of groups (each a list of verbatim input names) with
+        2+ members. On any error, or if the model returns no usable groups,
+        returns an empty list -- the caller treats that as "no semantic
+        duplicates found", which is the safe (keep-everything) fallback.
+
+        Conservative by design: the prompt instructs the model to only group
+        names that are CLEARLY the same startup, and to never group when in
+        doubt. A false positive (merging two distinct startups) is far worse
+        than a false negative (leaving a duplicate in place).
+        """
+        client = self._get_genai_client()
+        payload = json.dumps(names, ensure_ascii=False)
+        response = await client.aio.models.generate_content(
+            model=self.model,
+            contents=payload,
+            config=types.GenerateContentConfig(
+                system_instruction=self._dedup_instruction,
+                temperature=0,
+                response_mime_type="application/json",
+                response_schema=DedupGroups,
+            ),
+        )
+        parsed = getattr(response, "parsed", None)
+        if parsed is None or not isinstance(parsed, DedupGroups):
+            # Fallback: parse the text field as JSON. Some Vertex responses
+            # populate .text but not .parsed.
+            text = getattr(response, "text", "") or ""
+            if not text.strip():
+                return []
+            data = json.loads(text)
+            parsed = DedupGroups.model_validate(data)
+
+        # Filter to groups of 2+ members whose names actually appear in the
+        # input. The model is told to omit single-name groups and to only use
+        # verbatim input names, but we enforce it defensively here -- never
+        # trust LLM output to be well-formed.
+        name_set = set(names)
+        groups: list[list[str]] = []
+        for grp in parsed.groups or []:
+            members = [n for n in (grp.names or []) if n in name_set]
+            if len(members) >= 2:
+                groups.append(members)
+        return groups
+
+    def dedup_names_batch(self, names: list[str]) -> list[list[str]]:
+        """Synchronous wrapper: group semantically-equal startup names.
+
+        Input:  a flat list of startup name strings (up to ~500).
+        Output: a list of groups, each a list of 2+ verbatim input names that
+                refer to the same startup. An empty list means "no semantic
+                duplicates found" (the safe fallback on any failure too).
+
+        Runs a SINGLE LLM call for the whole batch. If the input exceeds the
+        LLM's comfortable single-call limit (DEDUP_NAMES_CHUNK = 500), the
+        names are chunked and each chunk gets its own call; results are
+        concatenated. A chunk that fails is skipped (its names are all kept),
+        so a transient API error never drops real startups.
+        """
+        if not names:
+            return []
+
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_closed():
+                raise RuntimeError("loop closed")
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+        DEDUP_NAMES_CHUNK = 500  # safe single-call ceiling for name lists
+
+        all_groups: list[list[str]] = []
+        for start in range(0, len(names), DEDUP_NAMES_CHUNK):
+            chunk = names[start:start + DEDUP_NAMES_CHUNK]
+            try:
+                groups = loop.run_until_complete(self._invoke_dedup_async(chunk))
+            except Exception as exc:  # noqa: BLE001 - keep startups on failure
+                print(
+                    f"  llm-dedup: chunk starting at {start} failed "
+                    f"({type(exc).__name__}: {exc}); keeping all {len(chunk)} "
+                    f"names ungrouped.",
+                    flush=True,
+                )
+                continue
+            all_groups.extend(groups)
+        return all_groups
 
     async def _invoke_async(self, country_items: list[dict]) -> tuple[dict, dict]:
         """Run classifier -> verifier on a batch. Returns (cls_by_row_id, ver_by_row_id)."""

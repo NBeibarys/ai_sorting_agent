@@ -43,3 +43,24 @@ class BatchVerdict(BaseModel):
     """Wraps a list of VerificationVerdict items, one per input row."""
     model_config = ConfigDict(extra="ignore")
     items: list[VerificationVerdict] = Field(default_factory=list, description="One verdict per input row, each carrying its row_id.")
+
+
+class DedupGroup(BaseModel):
+    """A group of startup names that refer to the same startup.
+
+    Each name must be a verbatim string from the input array. Groups with
+    fewer than 2 members are meaningless and must be omitted by the model.
+    """
+    model_config = ConfigDict(extra="ignore")
+    names: list[str] = Field(
+        description="Two or more startup names (verbatim from the input) that refer to the same startup."
+    )
+
+
+class DedupGroups(BaseModel):
+    """Wraps the list of dedup groups returned by the semantic dedup agent."""
+    model_config = ConfigDict(extra="ignore")
+    groups: list[DedupGroup] = Field(
+        default_factory=list,
+        description="Groups of startup names referring to the same startup. Omit single-name groups.",
+    )

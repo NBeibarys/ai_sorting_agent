@@ -29,6 +29,7 @@ class Config:
     telegram_column: str
     pitch_deck_column: str
     dedup_column: str
+    llm_dedup_enabled: bool = True
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -80,4 +81,5 @@ class Config:
                 "SORTER_PITCH_DECK_COLUMN", "pitch deck"
             ),
             dedup_column=os.environ.get("DEDUP_COLUMN", "Startup name"),
+            llm_dedup_enabled=os.environ.get("LLM_DEDUP_ENABLED", "TRUE").upper() == "TRUE",
         )
