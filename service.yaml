@@ -1,0 +1,55 @@
+# Cloud Run service definition for sorting-dashboard.
+# Deploy with: gcloud run services replace service.yaml --region us-central1
+# This file is the single source of truth for env vars, secrets, and config.
+# Ops workers ONLY need to update the image tag (if new image built) then run the command above.
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: sorting-dashboard
+  annotations:
+    run.googleapis.com/ingress: all
+spec:
+  template:
+    spec:
+      containerConcurrency: 80
+      timeoutSeconds: 300
+      serviceAccountName: 1030886862079-compute@developer.gserviceaccount.com
+      containers:
+      - image: us-central1-docker.pkg.dev/gen-lang-client-0847622378/sorting-apps/dashboard:latest
+        name: sorting-dashboard
+        env:
+        - name: GOOGLE_APPLICATION_CREDENTIALS
+          value: /secrets/service_account.json
+        - name: GOOGLE_GENAI_USE_VERTEXAI
+          value: "TRUE"
+        - name: GOOGLE_CLOUD_PROJECT
+          value: gen-lang-client-0847622378
+        - name: GOOGLE_CLOUD_LOCATION
+          value: global
+        - name: LLM_DEDUP_ENABLED
+          value: "TRUE"
+        - name: R2B_SHEET_ID
+          value: 1nPKrGpVrRsYus7jSPOflRct5Git4-THXsLhsCuXtcVg
+        - name: R2B_SHEET_RANGE
+          value: Form Responses 1
+        - name: ALCHEMIST_SHEET_ID
+          value: 1eTstP1hQyA9p0_hI17rO42_P16If_5F7jfjJqnnWkXM
+        - name: ALCHEMIST_SHEET_RANGE
+          value: Form Responses 1
+        ports:
+        - name: http1
+          containerPort: 8080
+        resources:
+          limits:
+            cpu: "1"
+            memory: 2Gi
+        volumeMounts:
+        - name: sa-key
+          mountPath: /secrets
+      volumes:
+      - name: sa-key
+        secret:
+          secretName: sorting-sa-key
+          items:
+          - key: latest
+            path: service_account.json
