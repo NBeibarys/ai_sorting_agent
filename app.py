@@ -400,6 +400,14 @@ def main():
         st.cache_data.clear()
         st.rerun()
 
+    if st.sidebar.button("Reset Checkpoint"):
+        import os
+        cp_path = f"checkpoint_{sheet_name.lower()}.json"
+        if os.path.exists(cp_path):
+            os.remove(cp_path)
+        st.success("Checkpoint cleared. All rows will be reclassified on next run.")
+        st.rerun()
+
     # ── Trends ─────────────────────────────────────────────────────────
     # X total applications in source tab, Y classified (in checkpoint),
     # Z = X - Y new since last run. Live reads, cached 30s.
