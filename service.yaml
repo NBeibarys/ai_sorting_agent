@@ -15,7 +15,7 @@ spec:
       timeoutSeconds: 300
       serviceAccountName: 1030886862079-compute@developer.gserviceaccount.com
       containers:
-      - image: us-central1-docker.pkg.dev/gen-lang-client-0847622378/sorting-apps/dashboard:latest
+      - image: us-central1-docker.pkg.dev/gen-lang-client-0847622378/sorting-apps/dashboard@sha256:c2191ebdadc15e1470ee7a11213f80af7a9227c97c85f0b693c00f343da15b
         name: sorting-dashboard
         env:
         - name: GOOGLE_APPLICATION_CREDENTIALS
