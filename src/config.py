@@ -7,9 +7,16 @@ Vertex AI only (GOOGLE_GENAI_USE_VERTEXAI=TRUE) — the Gemini Developer
 API path is intentionally not supported here. Reads from and writes back
 to the SAME Google Sheet via a service account, mirroring the sibling
 ai_fellowship_agent repo's config/validation pattern.
+
+Multiple programs coexist (R2B, Alchemist). The active program is
+selected via the ``program`` arg (CLI ``--program`` or the Streamlit
+sidebar selector); each program owns its own sheet-id / sheet-range
+env-var names so the two sheets never collide.
 """
 import os
 from dataclasses import dataclass
+
+from .programs import SortingConfig, get_program_config
 
 
 @dataclass(frozen=True)
@@ -30,12 +37,20 @@ class Config:
     pitch_deck_column: str
     dedup_column: str
     llm_dedup_enabled: bool = True
+    program_config: SortingConfig = None  # type: ignore[assignment]
 
     @classmethod
-    def from_env(cls) -> "Config":
-        sheet_id = os.environ.get("SORTER_SHEET_ID", "")
+    def from_env(cls, program: str = "alchemist") -> "Config":
+        """Build a Config from env vars for the given program.
+
+        ``program`` selects which SortingConfig (and thus which
+        sheet_id_env / sheet_range_env) is used. Defaults to
+        'alchemist' for backwards compatibility.
+        """
+        program_config = get_program_config(program)
+        sheet_id = os.environ.get(program_config.sheet_id_env, "")
         if not sheet_id:
-            raise RuntimeError("SORTER_SHEET_ID not set")
+            raise RuntimeError(f"{program_config.sheet_id_env} not set")
 
         service_account_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
         if not service_account_path or not os.path.isfile(service_account_path):
@@ -47,7 +62,7 @@ class Config:
         if not use_vertex:
             raise RuntimeError(
                 "GOOGLE_GENAI_USE_VERTEXAI must be TRUE — this pipeline uses Vertex AI, "
-                "not the Gemini Developer API."
+                "not the Gemini Developer API. Set GOOGLE_GENAI_USE_VERTEXAI=TRUE."
             )
 
         google_cloud_project = os.environ.get("GOOGLE_CLOUD_PROJECT", "")
@@ -60,7 +75,9 @@ class Config:
 
         return cls(
             sheet_id=sheet_id,
-            sheet_range=os.environ.get("SORTER_SHEET_RANGE", "Form Responses 1"),
+            sheet_range=os.environ.get(
+                program_config.sheet_range_env, program_config.default_sheet_range
+            ),
             service_account_path=service_account_path,
             use_vertex=True,
             google_cloud_project=google_cloud_project,
@@ -82,4 +99,5 @@ class Config:
             ),
             dedup_column=os.environ.get("DEDUP_COLUMN", "Startup name"),
             llm_dedup_enabled=os.environ.get("LLM_DEDUP_ENABLED", "TRUE").upper() == "TRUE",
+            program_config=program_config,
         )

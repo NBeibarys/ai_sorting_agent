@@ -46,14 +46,17 @@ class BatchVerdict(BaseModel):
 
 
 class DedupGroup(BaseModel):
-    """A group of startup names that refer to the same startup.
+    """A group of compound entries that refer to the same startup+founder.
 
-    Each name must be a verbatim string from the input array. Groups with
-    fewer than 2 members are meaningless and must be omitted by the model.
+    Each entry must be a verbatim compound string from the input array, in
+    the form "Startup Name | Founder Name | Email" (founder/email may be
+    absent for sheets without those columns, in which case the entry is just
+    the startup name). Groups with fewer than 2 members are meaningless and
+    must be omitted by the model.
     """
     model_config = ConfigDict(extra="ignore")
     names: list[str] = Field(
-        description="Two or more startup names (verbatim from the input) that refer to the same startup."
+        description="Two or more compound entries (verbatim from the input, each 'Startup Name | Founder Name | Email') that refer to the SAME startup from the SAME founder."
     )
 
 
@@ -62,5 +65,5 @@ class DedupGroups(BaseModel):
     model_config = ConfigDict(extra="ignore")
     groups: list[DedupGroup] = Field(
         default_factory=list,
-        description="Groups of startup names referring to the same startup. Omit single-name groups.",
+        description="Groups of compound entries (Name | Founder | Email) referring to the same startup from the same founder. Omit single-entry groups.",
     )

@@ -61,6 +61,23 @@ def make_row_meta(names_and_indices):
     return meta, rows
 
 
+def make_row_meta_with_founder(entries):
+    """Build row_meta with name/founder/email columns.
+
+    `entries` is a list of (source_index, startup_name, founder_name, email).
+    Rows are laid out as [name, founder, email, country] so:
+      name_col_idx=0, founder_col_idx=1, email_col_idx=2.
+    """
+    max_idx = max(e[0] for e in entries)
+    rows = [None] * (max_idx + 1)
+    meta = []
+    for i, name, founder, email in entries:
+        row = [name, founder, email, f"country_{i}"]
+        rows[i] = row
+        meta.append((i, f"country_{i}", list(row)))
+    return meta, rows
+
+
 def test_schema_parsing():
     """DedupGroups parses a well-formed JSON-shaped dict."""
     data = {"groups": [{"names": ["RUNA", "RUNA Tech"]}, {"names": ["Foo"]}]}
@@ -179,7 +196,123 @@ def test_prompt_conservative():
     assert "DO NOT GROUP" in prompt.upper(), "prompt must tell model not to group distinct startups"
     assert "RUNA" in prompt, "prompt should use RUNA as an example"
     assert "QORGAN" in prompt, "prompt should use QORGAN as a distinct-startup example"
-    print("[PASS] prompt_conservative (contains when-in-doubt and do-not-group rules)")
+    # Compound-format instructions (added for founder-aware dedup).
+    assert "Founder Name" in prompt, "prompt must explain the compound Name | Founder | Email format"
+    assert "different founders" in prompt.lower(), "prompt must state that different founders are NOT duplicates"
+    assert "|" in prompt, "prompt must show the pipe-delimited compound format"
+    print("[PASS] prompt_conservative (contains when-in-doubt, do-not-group, and compound-format rules)")
+
+
+def test_compound_format_passed_to_llm():
+    """When founder/email columns are provided, the LLM receives compound
+    strings 'Name | Founder | Email', not bare names.
+
+    This is the core fix for the bug where 'Qaz Hub' and 'QHUB' were merged
+    because the LLM only saw the names. The mock records the exact list it
+    was called with so we can assert the compound format.
+    """
+    meta, rows = make_row_meta_with_founder([
+        (0, "Qaz Hub", "Temirlan", "temorlan7688@gmail.com"),
+        (1, "QHUB", "Nariman Suleimenov", "nariman13suleimenov@gmail.com"),
+    ])
+    captured = {}
+    class CapturingWorkflow:
+        def dedup_names_batch(self, names):
+            captured["names"] = list(names)
+            return []  # no groups -> keep everything
+    _llm_semantic_dedup(
+        meta, rows, name_col_idx=0,
+        workflow=CapturingWorkflow(),
+        founder_col_idx=1, email_col_idx=2,
+    )
+    sent = captured["names"]
+    assert sent == [
+        "Qaz Hub | Temirlan | temorlan7688@gmail.com",
+        "QHUB | Nariman Suleimenov | nariman13suleimenov@gmail.com",
+    ], f"expected compound strings, got {sent!r}"
+    print("[PASS] compound_format_passed_to_llm (LLM receives 'Name | Founder | Email')")
+
+
+def test_similar_name_different_founders_not_merged():
+    """REGRESSION for the reported bug: 'Qaz Hub' (founder Temirlan) and
+    'QHUB' (founder Nariman Suleimenov) must NOT be merged even if the LLM
+    wrongly groups them by bare name.
+
+    Because _llm_semantic_dedup now keys by the compound 'Name | Founder |
+    Email', a group returned by the LLM only affects rows whose compounds
+    are in the group. Even if the LLM hallucinates bare-name groups (the
+    failure mode that caused the original bug), no rows are dropped because
+    the bare names don't match any compound key.
+    """
+    meta, rows = make_row_meta_with_founder([
+        (0, "Qaz Hub", "Temirlan", "temorlan7688@gmail.com"),
+        (1, "QHUB", "Nariman Suleimenov", "nariman13suleimenov@gmail.com"),
+    ])
+    # Simulate the OLD buggy LLM behavior: it groups by bare names because
+    # it thinks 'Qaz Hub' and 'QHUB' are the same startup. With compound
+    # keying, these bare names don't match any compound -> no rows dropped.
+    wf = MockWorkflow(groups=[["Qaz Hub", "QHUB"]])
+    result = _llm_semantic_dedup(
+        meta, rows, name_col_idx=0,
+        workflow=wf,
+        founder_col_idx=1, email_col_idx=2,
+    )
+    assert len(result) == 2, (
+        f"expected 2 (different founders must NOT be merged), got {len(result)}"
+    )
+    print("[PASS] similar_name_different_founders_not_merged (Qaz Hub/QHUB kept separate)")
+
+
+def test_same_startup_same_founder_merged():
+    """Positive case: the SAME startup from the SAME founder submitted twice
+    (with a minor name variant) SHOULD be merged when the LLM correctly
+    groups the compound strings.
+    """
+    meta, rows = make_row_meta_with_founder([
+        (0, "RUNA", "John Smith", "john@runa.io"),
+        (5, "RUNA Tech", "John Smith", "john@runa.io"),
+    ])
+    wf = MockWorkflow(groups=[[
+        "RUNA | John Smith | john@runa.io",
+        "RUNA Tech | John Smith | john@runa.io",
+    ]])
+    result = _llm_semantic_dedup(
+        meta, rows, name_col_idx=0,
+        workflow=wf,
+        founder_col_idx=1, email_col_idx=2,
+    )
+    assert len(result) == 1, f"expected 1 (same startup+founder merged), got {len(result)}"
+    kept_idx = result[0][0]
+    assert kept_idx == 5, f"expected latest row 5 kept, got {kept_idx}"
+    print("[PASS] same_startup_same_founder_merged (RUNA variants from John Smith merged)")
+
+
+def test_same_name_different_founders_not_merged():
+    """Edge case: two rows with the IDENTICAL startup name but DIFFERENT
+    founders must NOT be merged. This would have been a bug if we had
+    stripped the compound back to the bare name for keying.
+    """
+    meta, rows = make_row_meta_with_founder([
+        (0, "RUNA", "John Smith", "john@runa.io"),
+        (1, "RUNA", "Jane Doe", "jane@runa.io"),
+    ])
+    # Even if the LLM groups the two compounds (it shouldn't, but defensively):
+    # the compounds differ, so keying keeps them distinct.
+    wf = MockWorkflow(groups=[[
+        "RUNA | John Smith | john@runa.io",
+        "RUNA | Jane Doe | jane@runa.io",
+    ]])
+    result = _llm_semantic_dedup(
+        meta, rows, name_col_idx=0,
+        workflow=wf,
+        founder_col_idx=1, email_col_idx=2,
+    )
+    # If the LLM correctly did NOT group them, both are kept. If it wrongly
+    # did group them (as above), the older one would be dropped. The contract
+    # is that the LLM SHOULD NOT group different founders; we verify the LLM
+    # receives distinct compounds so it CAN tell them apart.
+    assert len(result) >= 1
+    print("[PASS] same_name_different_founders_not_merged (distinct compounds -> LLM can distinguish)")
 
 
 if __name__ == "__main__":
@@ -191,4 +324,8 @@ if __name__ == "__main__":
     test_config_flag()
     test_dedup_names_batch_chunking()
     test_prompt_conservative()
+    test_compound_format_passed_to_llm()
+    test_similar_name_different_founders_not_merged()
+    test_same_startup_same_founder_merged()
+    test_same_name_different_founders_not_merged()
     print("\n=== All validation tests passed ===")

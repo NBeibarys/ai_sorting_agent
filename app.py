@@ -33,14 +33,18 @@ if _REPO_DIR not in sys.path:
     sys.path.insert(0, _REPO_DIR)
 
 from src.config import Config
+from src.programs import get_program_config, list_programs
 from src import pipeline as pipeline_mod
 from src.google_clients import get_sheets_service, read_sheet_rows
 from src.pipeline import run_batch, _load_checkpoint, TARGET_TABS
 
-# Sheet IDs stored internally — not in .env, not visible to the user.
-SHEETS = {
-    "Alchemist": "1eTstP1hQyA9p0_hI17rO42_P16If_5F7jfjJqnnWkXM",
-    "R2B": "1nPKrGpVrRsYus7jSPOflRct5Git4-THXsLhsCuXtcVg",
+# Program selector drives sheet_id: each program (R2B, Alchemist) owns its
+# own sheet via env vars (R2B_SHEET_ID / ALCHEMIST_SHEET_ID). The sheet ID
+# is resolved at runtime from the program config — never hardcoded here.
+# Display name -> program key (lowercase). The display name is also used
+# to derive the per-program checkpoint path (checkpoint_r2b.json etc.).
+_PROGRAM_OPTIONS: dict[str, str] = {
+    get_program_config(p).program_name: p for p in list_programs()
 }
 
 # The 9 countries a user can toggle on/off in the sidebar. "Human Review"
@@ -303,8 +307,21 @@ def main():
     # ── Sidebar controls ────────────────────────────────────────────────
     st.sidebar.header("Controls")
 
-    sheet_name = st.sidebar.selectbox("Sheet", list(SHEETS.keys()))
-    sheet_id = SHEETS[sheet_name]
+    # Program selector: drives sheet_id + default tab from env vars.
+    program_display = st.sidebar.selectbox(
+        "Program", list(_PROGRAM_OPTIONS.keys())
+    )
+    program_key = _PROGRAM_OPTIONS[program_display]
+    program_config = get_program_config(program_key)
+    sheet_id = os.environ.get(program_config.sheet_id_env, "")
+    if not sheet_id:
+        st.error(
+            f"{program_config.sheet_id_env} not set. Add it to .env or the "
+            f"deployment environment."
+        )
+        st.stop()
+    # sheet_name is used for the per-program checkpoint filename.
+    sheet_name = program_display
 
     # Live-read tabs when a sheet is selected.
     try:
@@ -317,7 +334,14 @@ def main():
         st.error("No tabs found in the selected sheet.")
         st.stop()
 
-    tab = st.sidebar.selectbox("Tab", tabs)
+    # Default to the program's configured tab (e.g. "Form Responses 1")
+    # when it exists; otherwise fall back to the first tab.
+    default_tab = program_config.default_sheet_range
+    if default_tab in tabs:
+        default_tab_idx = tabs.index(default_tab)
+    else:
+        default_tab_idx = 0
+    tab = st.sidebar.selectbox("Tab", tabs, index=default_tab_idx)
 
     # Live-read headers from the selected tab.
     try:
@@ -389,12 +413,10 @@ def main():
 
     checkpoint_path = f"checkpoint_{sheet_name.lower()}.json"
     classified_count = len(_load_checkpoint(checkpoint_path))
-    new_since_last = max(total_apps - classified_count, 0)
 
-    t1, t2, t3 = st.columns(3)
+    t1, t2 = st.columns(2)
     t1.metric("Total Applications", total_apps)
     t2.metric("Classified", classified_count)
-    t3.metric("New Since Last Run", new_since_last)
     st.caption(
         f"Source tab: **{tab}** · Checkpoint: `{checkpoint_path}` "
         f"({classified_count} rows classified so far)."

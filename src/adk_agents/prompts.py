@@ -216,45 +216,72 @@ The classifier results you are verifying:
 def build_dedup_instruction() -> str:
     """Build the semantic dedup prompt for the LLM.
 
-    The LLM receives a JSON array of startup names and must return groups of
-    names that refer to the SAME startup. The prompt is deliberately
-    conservative: when in doubt, the LLM must NOT group names, because a false
-    positive (dropping a real distinct startup) is worse than a false negative
-    (keeping a duplicate). Distinct startups with similar names (e.g. RUNA vs
-    QORGAN) must never be grouped.
+    The LLM receives a JSON array of COMPOUND strings, each formatted as
+    "Startup Name | Founder Name | Email", and must return groups of entries
+    that refer to the SAME startup AND the SAME founder. The prompt is
+    deliberately conservative: when in doubt, the LLM must NOT group entries,
+    because a false positive (dropping a real distinct startup) is worse than
+    a false negative (keeping a duplicate). Distinct startups with similar
+    names (e.g. RUNA vs QORGAN) must never be grouped, and the SAME startup
+    name submitted by DIFFERENT founders must never be grouped.
     """
     return """
 You are a semantic deduplication agent for a startup-applications dataset.
 
-The user message is a JSON ARRAY of strings. Each string is a startup name
-exactly as it was submitted in an application form. The same startup may have
-been submitted multiple times under slightly different spellings, punctuation,
-legal suffixes, or word order.
+The user message is a JSON ARRAY of strings. Each string is a COMPOUND entry
+exactly as it was submitted in an application form, in the format:
 
-Your job: find groups of names that refer to the SAME startup and return them
-as groups. Names that are NOT clearly the same startup must NOT be grouped.
+    Startup Name | Founder Name | Email
+
+For example:
+    "Qaz Hub | Temirlan | temorlan7688@gmail.com"
+    "QHUB | Nariman Suleimenov | nariman13suleimenov@gmail.com"
+
+The same startup may have been submitted multiple times by the SAME founder
+under slightly different spellings, punctuation, legal suffixes, or word
+order. Your job: find groups of entries that refer to the SAME startup from
+the SAME founder and return them as groups. Entries that are NOT clearly the
+same startup-and-founder must NOT be grouped.
 
 RULES (in order of precedence):
-1. ONLY group names that are CLEARLY the same startup. "Clearly the same"
-   means: same brand/token (RUNA, QORGAN, AgroAI) ignoring legal suffixes,
-   punctuation, accents, case, and minor spelling differences. Examples of
-   CLEAR same-startup groups:
-     ["RUNA", "RUNA Tech", "RUNA Technology"]
-     ["Agro ai", "AgroAi", "Agro.ai"]
-     ["Uzbek Telecom", "UzbekTelecom"]
-2. DO NOT group names that merely share a common word or topic but are
+1. ONLY group entries that are CLEARLY the same startup from the SAME founder.
+   "Clearly the same" means: same brand/token (RUNA, QORGAN, AgroAI) ignoring
+   legal suffixes, punctuation, accents, case, and minor spelling differences,
+   AND the founder name and email also match (possibly with minor spelling
+   variations). Examples of CLEAR same-startup-same-founder groups:
+     ["RUNA | John Smith | john@runa.io", "RUNA Tech | J. Smith | john@runa.io"]
+     ["Agro ai | Ali Valiyev | ali@agro.ai", "AgroAi | Ali Valiev | ali@agro.ai"]
+2. DO NOT group entries that merely share a common word or topic but are
    DIFFERENT startups. Examples that MUST NOT be grouped:
-     ["RUNA", "QORGAN"]  -- different brands, not the same startup
-     ["AgroAI", "AgroBot"] -- different brands sharing the "Agro" prefix
-3. WHEN IN DOUBT, DO NOT GROUP. A false positive (dropping a real distinct
+     ["RUNA | John | john@runa.io", "QORGAN | John | john@qorgan.io"]
+       -- different brands, not the same startup
+     ["AgroAI | Ali | ali@agro.ai", "AgroBot | Ali | ali@agrobot.io"]
+       -- different brands sharing the "Agro" prefix
+3. DO NOT group entries with the same or similar startup name when the
+   FOUNDERS are DIFFERENT. Two entries are duplicates ONLY IF they are the
+   SAME startup from the SAME founder. Different founders with similar
+   startup names are NOT duplicates. Examples that MUST NOT be grouped:
+     ["Qaz Hub | Temirlan | temorlan7688@gmail.com",
+      "QHUB | Nariman Suleimenov | nariman13suleimenov@gmail.com"]
+       -- different founders AND different emails -> NOT duplicates, even
+          though the startup names "Qaz Hub" and "QHUB" look similar
+     ["RUNA | John Smith | john@runa.io", "RUNA | Jane Doe | jane@runa.io"]
+       -- same startup name but different founders -> NOT duplicates
+4. WHEN IN DOUBT, DO NOT GROUP. A false positive (dropping a real distinct
    startup) is worse than a false negative (keeping a duplicate). If you are
-   not confident two names are the same startup, leave them ungrouped.
-4. Ignore legal-entity suffixes when comparing: LLC, Ltd, Inc, Corp,
-   GmbH, OOO, AO, MChJ, and similar. "Foo LLC" and "Foo" are the same.
-5. Treat punctuation, accents, case, and whitespace as insignificant for
+   not confident two entries are the same startup from the same founder, leave
+   them ungrouped.
+5. Ignore legal-entity suffixes when comparing startup names: LLC, Ltd, Inc,
+   Corp, GmbH, OOO, AO, MChJ, and similar. "Foo LLC" and "Foo" are the same.
+6. Treat punctuation, accents, case, and whitespace as insignificant for
    comparison, but DO use them as hints (a typo of a known brand is likely
    the same startup).
-6. Never group an empty string with anything. Empty/blank names are not
+7. The email is context to help you distinguish different founders. It is NOT
+   a strict match key: the same founder may legitimately submit the same
+   startup from two different email addresses, or two different founders may
+   share a similar email. Use the email as a HINT about whether two entries
+   are from the same founder, not as a hard dedup key.
+8. Never group an empty string with anything. Empty/blank entries are not
    startups and are not your concern.
 
 OUTPUT FORMAT -- you MUST return a JSON object matching the DedupGroups
@@ -262,20 +289,25 @@ schema:
   {
     "groups": [
       {
-        "names": ["RUNA", "RUNA Tech", "RUNA Technology"]
+        "names": [
+          "RUNA | John Smith | john@runa.io",
+          "RUNA Tech | J. Smith | john@runa.io"
+        ]
       }
     ]
   }
 
-Each group MUST contain 2 or more names (a group of 1 is meaningless -- just
-omit it). Every name in a group MUST appear verbatim in the input array.
-Only group names that are clearly the same startup. When in doubt, omit the
-group.
+Each group MUST contain 2 or more entries (a group of 1 is meaningless -- just
+omit it). Every entry in a group MUST appear VERBATIM in the input array,
+including the full "Name | Founder | Email" compound string. Only group
+entries that are clearly the same startup from the same founder. When in doubt,
+omit the group.
 
 CRITICAL:
-- Return ONLY groups with 2+ members. Omit single-name "groups".
-- Do not invent names not present in the input.
-- Do not group names from different startups.
+- Return ONLY groups with 2+ members. Omit single-entry "groups".
+- Do not invent entries not present in the input.
+- Do not group entries from different startups.
+- Do not group entries with the same startup name but different founders.
 - When in doubt, do not group.
 """.strip()
 

@@ -475,6 +475,8 @@ def _llm_semantic_dedup(
     name_col_idx,
     *,
     workflow,
+    founder_col_idx=None,
+    email_col_idx=None,
 ) -> list:
     """Second dedup pass: LLM checks surviving startup names semantically.
 
@@ -484,19 +486,30 @@ def _llm_semantic_dedup(
     Technology' vs 'RUNA' -- by asking Gemini to group names referring to
     the same startup.
 
-    A SINGLE LLM call is made for the whole batch of surviving names (chunked
-    only if the list exceeds 500 names). For each group with >1 entry, the
-    LATEST submission (highest source row index) is kept and earlier entries
-    are dropped, mirroring the string pass's keep-latest semantics. Each
-    removed row is logged with reason 'semantic'.
+    COMPOUND ENTRIES: To prevent the LLM from merging distinct startups that
+    merely have similar names (e.g. 'Qaz Hub' vs 'QHUB', two different
+    startups with different founders), each entry sent to the LLM is a
+    compound string "Startup Name | Founder Name | Email". The LLM is
+    instructed to only group entries that are the SAME startup from the SAME
+    founder. See build_dedup_instruction() for the full prompt.
+
+    A SINGLE LLM call is made for the whole batch of surviving entries
+    (chunked only if the list exceeds 500 entries). For each group with >1
+    entry, the LATEST submission (highest source row index) is kept and
+    earlier entries are dropped, mirroring the string pass's keep-latest
+    semantics. Each removed row is logged with reason 'semantic'.
 
     Conservative: any LLM error, empty result, or disabled flag means this
     pass returns row_meta unchanged (keep everything). A false positive
     (dropping a real distinct startup) is worse than a false negative
     (keeping a duplicate).
 
-    `name_col_idx` is the column to read startup names from. `workflow` is
-    an AdkSorterWorkflow instance with `.dedup_names_batch()`.
+    `name_col_idx` is the column to read startup names from. `founder_col_idx`
+    and `email_col_idx` are optional column indices for the founder-name and
+    email columns; when available they are appended to the compound string
+    sent to the LLM (they are NOT used as dedup keys -- email in particular is
+    only context to help the LLM distinguish different founders). `workflow`
+    is an AdkSorterWorkflow instance with `.dedup_names_batch()`.
     """
     if not row_meta or name_col_idx is None:
         return row_meta
@@ -508,32 +521,54 @@ def _llm_semantic_dedup(
             return (rows[row_idx][idx] or "").strip()
         return ""
 
-    # Map each distinct startup name -> list of row_meta entries that carry
+    def _compound(row_idx: int) -> str:
+        """Build 'Startup Name | Founder Name | Email' for the LLM.
+
+        Founder and email are only included when their columns were located
+        (non-None) and the cell has a value; missing parts collapse cleanly
+        so the LLM still sees a usable string. This means a sheet with no
+        founder/email columns gracefully degrades to name-only behavior.
+        """
+        name = _cell(name_col_idx, row_idx)
+        parts = [name]
+        if founder_col_idx is not None:
+            founder = _cell(founder_col_idx, row_idx)
+            if founder:
+                parts.append(founder)
+        if email_col_idx is not None:
+            email = _cell(email_col_idx, row_idx)
+            if email:
+                parts.append(email)
+        return " | ".join(parts)
+
+    # Map each distinct compound entry -> list of row_meta entries that carry
     # it. row_meta entries are 3-tuples (i, country_raw, full_row); source
-    # index i sorts ascending, so the LAST entry for a name is the latest
-    # submission.
-    name_to_entries: "OrderedDict[str, list]" = OrderedDict()
-    ordered_names: list[str] = []
+    # index i sorts ascending, so the LAST entry for a compound is the latest
+    # submission. Keying by the compound (not the bare name) means two rows
+    # that share a startup name but have different founders/emails are
+    # treated as DISTINCT entries and can never be merged by the LLM.
+    compound_to_entries: "OrderedDict[str, list]" = OrderedDict()
+    ordered_compounds: list[str] = []
     for meta_entry in row_meta:
         i = meta_entry[0]
-        name = _cell(name_col_idx, i)
-        if not name:
+        compound = _compound(i)
+        if not compound:
             continue
-        if name not in name_to_entries:
-            name_to_entries[name] = []
-            ordered_names.append(name)
-        name_to_entries[name].append(meta_entry)
+        if compound not in compound_to_entries:
+            compound_to_entries[compound] = []
+            ordered_compounds.append(compound)
+        compound_to_entries[compound].append(meta_entry)
 
-    if len(ordered_names) < 2:
+    if len(ordered_compounds) < 2:
         return row_meta  # nothing to compare
 
     print(
-        f"LLM semantic dedup: checking {len(ordered_names)} unique startup "
-        f"names in a single batch...",
+        f"LLM semantic dedup: checking {len(ordered_compounds)} unique "
+        f"startup/founder entries in a single batch...",
         flush=True,
     )
     try:
-        groups = workflow.dedup_names_batch(ordered_names)
+        groups = workflow.dedup_names_batch(ordered_compounds)
     except Exception as exc:  # noqa: BLE001 - never drop startups on LLM failure
         print(
             f"LLM semantic dedup FAILED ({type(exc).__name__}: {exc}); "
@@ -547,17 +582,17 @@ def _llm_semantic_dedup(
         return row_meta
 
     # For each group, the entry with the highest source index i is kept;
-    # all earlier entries for that name are dropped. We track the id() of
+    # all earlier entries for that compound are dropped. We track the id() of
     # the meta_entry tuples to REMOVE (not keep) -- tuple identity lets us
-    # mark specific instances even when two rows share the same name.
+    # mark specific instances even when two rows share the same compound.
     drop_entry_ids: set = set()
     dropped = 0
-    for group_names in groups:
-        # Gather all meta entries whose name is in this group, in source
+    for group_compounds in groups:
+        # Gather all meta entries whose compound is in this group, in source
         # order (ascending i). id() lets us mark specific tuple instances.
         entries_in_group: list = []
-        for n in group_names:
-            for meta_entry in name_to_entries.get(n, []):
+        for c in group_compounds:
+            for meta_entry in compound_to_entries.get(c, []):
                 entries_in_group.append(meta_entry)
         if len(entries_in_group) < 2:
             continue
@@ -570,8 +605,8 @@ def _llm_semantic_dedup(
             i = meta_entry[0]
             keep_i = keep_entry[0]
             print(
-                f"  dedup-semantic: row {i} dropped (same startup as row "
-                f"{keep_i} per LLM; names: {group_names!r})",
+                f"  dedup-semantic: row {i} dropped (same startup/founder as "
+                f"row {keep_i} per LLM; entries: {group_compounds!r})",
                 flush=True,
             )
 
@@ -724,6 +759,8 @@ def run_batch(config: Config, *, dry_run: bool = False, force: bool = False, lim
         row_meta = _llm_semantic_dedup(
             row_meta, rows, cols.get("name"),
             workflow=workflow,
+            founder_col_idx=cols.get("founder"),
+            email_col_idx=cols.get("email"),
         )
     total = len(row_meta)  # post-dedup count, used for reporting/summary
 

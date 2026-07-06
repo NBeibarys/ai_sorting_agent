@@ -13,6 +13,12 @@ def main():
         description="Sort startups by HQ country into Google Sheet tabs."
     )
     parser.add_argument(
+        "--program",
+        default="alchemist",
+        help="Program config to use: 'r2b' or 'alchemist' (default: alchemist). "
+             "Selects which sheet (R2B_SHEET_ID / ALCHEMIST_SHEET_ID) to read.",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Classify with a local heuristic instead of the LLM; no API calls (reads the sheet, no sheet writes).",
@@ -31,7 +37,8 @@ def main():
     args = parser.parse_args()
 
     load_dotenv(override=False)
-    config = Config.from_env()
+    config = Config.from_env(args.program)
+    print(f"Program: {args.program}")
     print(f"Sheet:  {config.sheet_id} (tab {config.sheet_range!r})")
     print(f"Model:  {config.model}  (dry_run={args.dry_run}, vertex={config.use_vertex})")
 
