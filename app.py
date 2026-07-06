@@ -216,7 +216,7 @@ def _read_all_country_tabs(sheet_id: str) -> tuple[list, list]:
 
 def _build_config(
     sheet_id, tab, classify_col, dedup_col, sheet_name,
-    name_col, founder_col, email_col, telegram_col, pitch_deck_col,
+    name_col, founder_col, telegram_col, pitch_deck_col,
 ) -> Config:
     """Build a Config manually from user selections (not from_env).
 
@@ -237,7 +237,7 @@ def _build_config(
         country_column=classify_col,
         name_column=name_col,
         founder_name_column=founder_col,
-        email_column=email_col,
+        email_column="",
         telegram_column=telegram_col,
         pitch_deck_column=pitch_deck_col,
         dedup_column=dedup_col,
@@ -347,7 +347,6 @@ def main():
         headers, _COL_NEEDLES["name"], exclude=["ceo", "founder"]
     )
     founder_col = _auto_detect_column(headers, _COL_NEEDLES["founder"])
-    email_col = _auto_detect_column(headers, _COL_NEEDLES["email"])
     telegram_col = _auto_detect_column(headers, _COL_NEEDLES["telegram"])
     pitch_deck_col = _auto_detect_column(headers, _COL_NEEDLES["pitch_deck"])
 
@@ -405,7 +404,7 @@ def main():
     if st.button("Classify New Rows", type="primary"):
         config = _build_config(
             sheet_id, tab, classify_col, dedup_col, sheet_name,
-            name_col, founder_col, email_col, telegram_col, pitch_deck_col,
+            name_col, founder_col, telegram_col, pitch_deck_col,
         )
 
         # BEFORE: compute counts so the user knows what's about to happen.
