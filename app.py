@@ -401,7 +401,6 @@ def main():
         st.rerun()
 
     if st.sidebar.button("Reset Checkpoint"):
-        import os
         cp_path = f"checkpoint_{sheet_name.lower()}.json"
         if os.path.exists(cp_path):
             os.remove(cp_path)
